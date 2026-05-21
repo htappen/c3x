@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This repository contains `c3x`, the planned Python CLI for the `flow-mode` local agentic coding workflow.
+This repository contains `c3x`, the Python CLI for the `flow-mode` local agentic coding workflow.
 
 - `docs/architecture.md`: high-level system design and agent roles.
 - `docs/plan.md`: phased implementation plan.
@@ -15,6 +15,7 @@ Current and planned layout:
 - `tests/`: unit, integration, and CLI tests.
 - `tests/fixtures/`: fake `codex`, temp repo fixtures, and test data.
 - `scripts/setup.sh`: installs Beads if needed and sets up the Python dev environment.
+- `skills/flow-*/`: Codex skill instructions for c3x architect, worker, reviewer, critic, and verify roles.
 
 ## Build, Test, and Development Commands
 
@@ -34,7 +35,7 @@ c3x status
 pytest
 ```
 
-Use isolated validation projects when checking repository behavior:
+Use isolated validation projects for behavior checks:
 
 ```bash
 PROJECT_DIR="$(scripts/validate-setup.sh)"
@@ -47,13 +48,13 @@ scripts/validate-teardown.sh
 
 ## Coding Style & Naming Conventions
 
-For documentation, use concise Markdown with sentence-case prose and descriptive headings. Keep examples shell-copyable and repository-specific.
+For documentation, use concise Markdown with descriptive headings. Keep examples shell-copyable and repository-specific.
 
 For Python code, use 4-space indentation, typed functions where practical, and snake_case for modules, functions, variables, and test files. Keep orchestration logic separated from command execution so tests can inject fake `codex`, clocks, and process runners.
 
 ## Testing Guidelines
 
-Follow `docs/testing-guidelines.md`. Unit tests should avoid real `git`, `bd`, and `codex`. Integration tests may use real `git` worktrees and real `bd` against isolated temporary repositories. Default tests must use a fake `codex` command and must not contact a real model-backed agent.
+Follow `docs/testing-guidelines.md`. Unit tests should avoid real `git`, `bd`, and `codex`. Integration tests may use real `git` worktrees and real `bd` against isolated temporary repositories. Default tests must use fake `codex`.
 
 Prefer test names that describe behavior, for example:
 
@@ -70,7 +71,7 @@ There is no existing commit history, so no project-specific commit convention ha
 Add flow-mode testing guidelines
 ```
 
-Pull requests should include a clear summary, linked Beads task or issue when available, test evidence, and notes about any verification gaps. For UI or terminal-output changes, include before/after output snippets when useful.
+Pull requests should include a clear summary, linked Beads task or issue when available, test evidence, and notes about verification gaps. For terminal-output changes, include before/after snippets when useful.
 
 ## Agent-Specific Instructions
 
@@ -78,4 +79,4 @@ Do not overwrite user work. Before editing, check `git status --short`. Keep `do
 
 Generated validation state belongs under `.tmp/validation`; do not create ad hoc temp projects in the repository root.
 
-Automatically commit after finishing each major piece of work unless the user explicitly asks not to commit. Run the relevant tests first, stage only the intended files, and use a concise imperative commit message.
+Automatically commit after each major piece of work unless the user asks not to. Run relevant tests first, stage only intended files, and use a concise imperative message.

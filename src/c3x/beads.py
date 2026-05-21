@@ -19,6 +19,9 @@ class BeadSummary:
     status: str | None = None
     priority: int | None = None
     type: str | None = None
+    description: str | None = None
+    notes: str | None = None
+    acceptance: str | None = None
     labels: tuple[str, ...] = ()
 
 
@@ -64,9 +67,71 @@ class Beads:
         payload = self._run_json(["list", "--status", "open", "--json"])
         return _summaries(payload)
 
+    def list_active(self) -> list[BeadSummary]:
+        payload = self._run_json(["list", "--status", "open,in_progress,blocked", "--json"])
+        return _summaries(payload)
+
     def ready(self) -> list[BeadSummary]:
         payload = self._run_json(["ready", "--json"])
         return _summaries(payload)
+
+    def show(self, task_id: str) -> BeadSummary:
+        payload = self._run_json(["show", task_id, "--json"])
+        summaries = _summaries(payload)
+        if not summaries and isinstance(payload, dict):
+            summaries = _summaries([payload])
+        if not summaries:
+            raise BeadsError(f"Bead not found: {task_id}")
+        return summaries[0]
+
+    def add_note(self, task_id: str, note: str) -> None:
+        self._run(["note", task_id, note], expect_json=False)
+
+    def set_status(self, task_id: str, status: str) -> None:
+        self._run(["update", task_id, "--status", status], expect_json=False)
+
+    def add_labels(self, task_id: str, labels: list[str]) -> None:
+        if not labels:
+            return
+        args = ["update", task_id]
+        for label in labels:
+            args.extend(["--add-label", label])
+        self._run(args, expect_json=False)
+
+    def remove_labels(self, task_id: str, labels: list[str]) -> None:
+        if not labels:
+            return
+        args = ["update", task_id]
+        for label in labels:
+            args.extend(["--remove-label", label])
+        self._run(args, expect_json=False)
+
+    def close(self, task_id: str, reason: str) -> None:
+        self._run(["close", task_id, "--reason", reason], expect_json=False)
+
+    def create_task(
+        self,
+        title: str,
+        *,
+        description: str,
+        labels: list[str],
+        issue_type: str = "task",
+        priority: int = 2,
+    ) -> dict[str, Any]:
+        args = [
+            "create",
+            title,
+            "--description",
+            description,
+            "--type",
+            issue_type,
+            "--priority",
+            str(priority),
+            "--labels",
+            ",".join(labels),
+            "--json",
+        ]
+        return self._run_json(args)
 
     def _run_json(self, args: list[str]) -> Any:
         result = self._run(args, expect_json=True)
@@ -107,6 +172,9 @@ def _summaries(payload: Any) -> list[BeadSummary]:
                 status=_optional_str(item.get("status")),
                 priority=_optional_int(item.get("priority")),
                 type=_optional_str(item.get("type")),
+                description=_optional_str(item.get("description")),
+                notes=_optional_str(item.get("notes")),
+                acceptance=_optional_str(item.get("acceptance")),
                 labels=tuple(str(label) for label in labels),
             )
         )
@@ -117,7 +185,7 @@ def _extract_items(payload: Any) -> list[Any]:
     if isinstance(payload, list):
         return payload
     if isinstance(payload, dict):
-        for key in ("issues", "items", "results", "ready"):
+        for key in ("issues", "items", "results", "ready", "data"):
             value = payload.get(key)
             if isinstance(value, list):
                 return value

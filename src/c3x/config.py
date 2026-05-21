@@ -12,6 +12,19 @@ CONFIG_PATH = Path(FLOW_DIR) / "config.yml"
 
 class AgentConfig(BaseModel):
     codex_command: str = "codex"
+    codex_args: list[str] = Field(
+        default_factory=lambda: [
+            "exec",
+            "--full-auto",
+            "--model",
+            "{model}",
+            "--cd",
+            "{worktree}",
+            "--output-last-message",
+            "{last_message}",
+            "{prompt}",
+        ]
+    )
 
 
 class ModelConfig(BaseModel):
@@ -41,6 +54,7 @@ class C3xConfig(BaseModel):
     models: ModelConfig = Field(default_factory=ModelConfig)
     limits: LimitConfig = Field(default_factory=LimitConfig)
     permissions: PermissionConfig = Field(default_factory=PermissionConfig)
+    verify: list[str] = Field(default_factory=list)
 
 
 def default_config() -> C3xConfig:
@@ -63,4 +77,3 @@ def write_default_config(root: Path) -> Path:
     data = default_config().model_dump(mode="json")
     path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     return path
-
