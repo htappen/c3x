@@ -1,0 +1,137 @@
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+class BeadsError(RuntimeError):
+    """Raised when a bd command fails or returns unusable output."""
+
+
+@dataclass(frozen=True)
+class BeadSummary:
+    id: str
+    title: str
+    status: str | None = None
+    priority: int | None = None
+    type: str | None = None
+    labels: tuple[str, ...] = ()
+
+
+class Beads:
+    def __init__(self, root: Path, executable: str = "bd") -> None:
+        self.root = root
+        self.executable = executable
+
+    def require_installed(self) -> None:
+        if shutil.which(self.executable) is None:
+            raise BeadsError(
+                f"`{self.executable}` is not installed or is not on PATH. "
+                "Run `scripts/setup.sh` or install Beads, then retry."
+            )
+
+    def init(self) -> None:
+        self.require_installed()
+        self._run(["init", "--quiet"], expect_json=False)
+
+    def create_inbox_item(
+        self,
+        title: str,
+        *,
+        description: str | None = None,
+        priority: int = 2,
+    ) -> dict[str, Any]:
+        args = [
+            "create",
+            title,
+            "-t",
+            "task",
+            "-p",
+            str(priority),
+            "-l",
+            "flow,inbox,idea",
+        ]
+        if description:
+            args.extend(["--description", description])
+        args.append("--json")
+        return self._run_json(args)
+
+    def list_open(self) -> list[BeadSummary]:
+        payload = self._run_json(["list", "--status", "open", "--json"])
+        return _summaries(payload)
+
+    def ready(self) -> list[BeadSummary]:
+        payload = self._run_json(["ready", "--json"])
+        return _summaries(payload)
+
+    def _run_json(self, args: list[str]) -> Any:
+        result = self._run(args, expect_json=True)
+        try:
+            return json.loads(result.stdout or "null")
+        except json.JSONDecodeError as exc:
+            raise BeadsError(f"`bd {' '.join(args)}` returned invalid JSON") from exc
+
+    def _run(self, args: list[str], *, expect_json: bool) -> subprocess.CompletedProcess[str]:
+        self.require_installed()
+        result = subprocess.run(
+            [self.executable, *args],
+            cwd=self.root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise BeadsError(f"`bd {' '.join(args)}` failed: {detail}")
+        if expect_json and not result.stdout.strip():
+            raise BeadsError(f"`bd {' '.join(args)}` returned no JSON output")
+        return result
+
+
+def _summaries(payload: Any) -> list[BeadSummary]:
+    items = _extract_items(payload)
+    summaries: list[BeadSummary] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        labels = item.get("labels") or []
+        summaries.append(
+            BeadSummary(
+                id=str(item.get("id") or ""),
+                title=str(item.get("title") or ""),
+                status=_optional_str(item.get("status")),
+                priority=_optional_int(item.get("priority")),
+                type=_optional_str(item.get("type")),
+                labels=tuple(str(label) for label in labels),
+            )
+        )
+    return [summary for summary in summaries if summary.id]
+
+
+def _extract_items(payload: Any) -> list[Any]:
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("issues", "items", "results", "ready"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+    return []
+
+
+def _optional_str(value: Any) -> str | None:
+    return None if value is None else str(value)
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

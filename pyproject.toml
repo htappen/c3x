@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "c3x"
+version = "0.1.0"
+description = "Local agentic coding supervisor for Codex and Beads"
+readme = "AGENTS.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+  "pydantic>=2.8",
+  "PyYAML>=6.0",
+  "rich>=13.7",
+  "typer>=0.12",
+]
+
+[project.optional-dependencies]
+dev = [ 
+  "pytest>=8.2",
+  "pytest-console-scripts>=1.4",
+]
+
+[project.scripts]
+c3x = "c3x.cli:app"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
