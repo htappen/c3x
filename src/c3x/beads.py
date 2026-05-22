@@ -56,7 +56,7 @@ class Beads:
             "-p",
             str(priority),
             "-l",
-            "flow,inbox,idea",
+            "flow,inbox,idea,unreviewed,human-feedback",
         ]
         if description:
             args.extend(["--description", description])

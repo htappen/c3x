@@ -76,11 +76,22 @@ def add(
         int,
         typer.Option("--priority", "-p", min=0, max=4, help="Beads priority, 0 highest."),
     ] = 2,
+    validate: Annotated[
+        bool,
+        typer.Option(
+            "--validate/--no-validate",
+            help="Validate the feedback synchronously and ask clarification questions before returning.",
+        ),
+    ] = True,
 ) -> None:
     """Add raw feedback to the Beads-backed c3x inbox."""
     root = _root()
+    beads = _beads(root)
     try:
-        item = _beads(root).create_inbox_item(title, description=description, priority=priority)
+        item = beads.create_inbox_item(title, description=description, priority=priority)
+        item_id = str(item.get("id", "<unknown>"))
+        if validate and item_id != "<unknown>":
+            _validate_item_interactively(root, beads, item_id)
     except BeadsError as exc:
         raise typer.Exit(_error(str(exc))) from exc
 
@@ -143,12 +154,41 @@ def answer(
     root = _root()
     beads = _beads(root)
     try:
+        question = beads.show(task_id)
         beads.add_note(task_id, f"Human answer: {text}")
         beads.add_labels(task_id, ["answered"])
-        beads.remove_labels(task_id, ["question"])
+        beads.remove_labels(task_id, ["question", "needs-human-clarification"])
+        blocked_item = _blocked_item_id(question)
+        if blocked_item:
+            beads.add_note(blocked_item, f"Clarification from {task_id}: {text}")
+            beads.add_labels(blocked_item, ["clarified"])
+        beads.close(task_id, "Answered human clarification")
     except BeadsError as exc:
         raise typer.Exit(_error(str(exc))) from exc
     console.print(f"[green]Answered[/green] {task_id}")
+
+
+@app.command()
+def questions() -> None:
+    """Show outstanding human clarification questions."""
+    root = _root()
+    try:
+        items = _open_questions(_beads(root))
+    except BeadsError as exc:
+        raise typer.Exit(_error(str(exc))) from exc
+    _print_items("Questions", items)
+
+
+@app.command()
+def clarify() -> None:
+    """Answer outstanding human clarification questions in a terminal chat loop."""
+    root = _root()
+    beads = _beads(root)
+    try:
+        _clarify_questions(beads)
+        _plan_inbox(root, beads)
+    except BeadsError as exc:
+        raise typer.Exit(_error(str(exc))) from exc
 
 
 @app.command()
@@ -168,6 +208,38 @@ def run(
         _supervisor_tick(_root(), dispatch=dispatch)
         if once:
             return
+        time.sleep(interval)
+
+
+@app.command()
+def watch(
+    interval: Annotated[int, typer.Option("--interval", min=1, help="Loop sleep seconds.")] = 5,
+    review: Annotated[
+        bool,
+        typer.Option("--review/--no-review", help="Automatically review completed worker results."),
+    ] = True,
+    land: Annotated[
+        bool,
+        typer.Option("--land/--no-land", help="Automatically land reviewed work into the current root branch."),
+    ] = True,
+    cleanup_done: Annotated[
+        bool,
+        typer.Option("--cleanup/--no-cleanup", help="Automatically remove landed worktrees and branches."),
+    ] = True,
+) -> None:
+    """Run the autonomous c3x watch loop."""
+    while True:
+        if pause_path(_root()).exists():
+            console.print("[yellow]c3x is paused.[/yellow]")
+            time.sleep(interval)
+            continue
+        _supervisor_tick(
+            _root(),
+            dispatch=True,
+            review=review,
+            land=land,
+            cleanup_done=cleanup_done,
+        )
         time.sleep(interval)
 
 
@@ -384,13 +456,19 @@ def _print_items(title: str, items: list[BeadSummary]) -> None:
     console.print(table)
 
 
-def _supervisor_tick(root: Path, *, dispatch: bool) -> None:
+def _supervisor_tick(
+    root: Path,
+    *,
+    dispatch: bool,
+    review: bool = False,
+    land: bool = False,
+    cleanup_done: bool = False,
+) -> None:
     beads = _beads(root)
     _import_finished_results(root, beads)
     _plan_inbox(root, beads)
     _critic_tick(beads)
     if dispatch:
-        _warn_if_risky_flow_branch(root)
         config = load_config(root)
         running = len(_with_labels(beads.list_active(), {"flow", "running"}))
         slots = max(config.limits.max_parallel_workers - running, 0)
@@ -400,6 +478,10 @@ def _supervisor_tick(root: Path, *, dispatch: bool) -> None:
                 beads.set_status(task.id, "in_progress")
                 beads.add_labels(task.id, ["flow", "running"])
                 beads.remove_labels(task.id, ["ready", "blocked", "reviewing"])
+    if review:
+        _auto_review(root, beads)
+    if land:
+        _auto_land(root, beads, cleanup_done=cleanup_done)
     status()
 
 
@@ -407,6 +489,11 @@ def _plan_inbox(root: Path, beads: Beads) -> None:
     inbox_items = _with_labels(beads.list_open(), {"flow", "inbox", "idea"})
     for item in inbox_items:
         if "planned" in item.labels:
+            continue
+        if _questions_for_item(beads, item.id):
+            continue
+        if _needs_clarification(item):
+            _create_clarification_question(beads, item)
             continue
         description = item.description or item.title
         created = beads.create_task(
@@ -424,8 +511,132 @@ def _plan_inbox(root: Path, beads: Beads) -> None:
         child_id = str(created.get("id", "new task"))
         beads.add_note(item.id, f"Planned as {child_id}")
         beads.add_labels(item.id, ["planned"])
+        beads.remove_labels(item.id, ["unreviewed"])
         beads.close(item.id, f"Planned as {child_id}")
         console.print(f"[green]Planned[/green] {item.id} -> {child_id}")
+
+
+def _validate_item_interactively(root: Path, beads: Beads, item_id: str) -> None:
+    while True:
+        _plan_inbox(root, beads)
+        item_questions = _questions_for_item(beads, item_id)
+        if not item_questions:
+            return
+        _clarify_questions(beads, questions=item_questions)
+
+
+def _clarify_questions(beads: Beads, questions: list[BeadSummary] | None = None) -> None:
+    pending = questions if questions is not None else _open_questions(beads)
+    if not pending:
+        console.print("[green]No outstanding clarification questions.[/green]")
+        return
+    for question in pending:
+        console.print(f"[bold]Question {question.id}[/bold]: {question.title}")
+        if question.description:
+            console.print(question.description)
+        answer_text = typer.prompt("Answer")
+        beads.add_note(question.id, f"Human answer: {answer_text}")
+        beads.add_labels(question.id, ["answered"])
+        beads.remove_labels(question.id, ["question", "needs-human-clarification"])
+        blocked_item = _blocked_item_id(question)
+        if blocked_item:
+            beads.add_note(blocked_item, f"Clarification from {question.id}: {answer_text}")
+            beads.add_labels(blocked_item, ["clarified"])
+        beads.close(question.id, "Answered human clarification")
+
+
+def _open_questions(beads: Beads) -> list[BeadSummary]:
+    return _with_labels(beads.list_active(), {"flow", "question", "needs-human-clarification"})
+
+
+def _questions_for_item(beads: Beads, item_id: str) -> list[BeadSummary]:
+    return [
+        question
+        for question in _open_questions(beads)
+        if question.description and f"Blocks: {item_id}" in question.description
+    ]
+
+
+def _needs_clarification(item: BeadSummary) -> bool:
+    if "clarified" in item.labels:
+        return False
+    text = " ".join(part for part in (item.title, item.description or "") if part).strip()
+    return len(text.split()) < 4
+
+
+def _blocked_item_id(question: BeadSummary) -> str | None:
+    if not question.description:
+        return None
+    for line in question.description.splitlines():
+        if line.startswith("Blocks: "):
+            return line.removeprefix("Blocks: ").strip() or None
+    return None
+
+
+def _create_clarification_question(beads: Beads, item: BeadSummary) -> None:
+    existing = _questions_for_item(beads, item.id)
+    if existing:
+        return
+    question = beads.create_task(
+        f"Clarify: {item.title}",
+        description=(
+            f"Blocks: {item.id}\n\n"
+            "The feedback is too underspecified to turn into safe worker tasks. "
+            "Describe the desired behavior, affected area, and how you would recognize success."
+        ),
+        labels=["flow", "question", "needs-human-clarification"],
+        issue_type="task",
+        priority=item.priority or 2,
+    )
+    question_id = str(question.get("id", "new question"))
+    beads.add_note(item.id, f"Needs human clarification: {question_id}")
+    console.print(f"[yellow]Question[/yellow] {question_id} blocks {item.id}")
+
+
+def _auto_review(root: Path, beads: Beads) -> None:
+    for item in _with_labels(beads.list_active(), {"flow", "reviewing"}):
+        if "reviewed" in item.labels:
+            continue
+        try:
+            result = _load_worker_result(root, item.id)
+            _review_result(result)
+            beads.add_note(item.id, f"c3x auto-review passed: {result.summary}")
+            beads.add_labels(item.id, ["reviewed"])
+            record = RunRecord.load(run_record_path(root, item.id))
+            record.status = "reviewed"
+            record.outcome = "reviewed"
+            record.save(run_record_path(root, item.id))
+            console.print(f"[green]Reviewed[/green] {item.id}")
+        except (BeadsError, ValueError) as exc:
+            beads.add_note(item.id, f"c3x auto-review blocked: {exc}")
+            beads.add_labels(item.id, ["flow", "blocked", "review-blocked"])
+            beads.remove_labels(item.id, ["reviewing"])
+            console.print(f"[yellow]Review blocked[/yellow] {item.id}: {exc}")
+
+
+def _auto_land(root: Path, beads: Beads, *, cleanup_done: bool) -> None:
+    for item in _with_labels(beads.list_active(), {"flow", "reviewing", "reviewed"}):
+        try:
+            record = RunRecord.load(run_record_path(root, item.id))
+            if record.status != "reviewed":
+                continue
+            merge_branch(root, record.branch)
+            beads.close(item.id, "Landed by c3x watch")
+            beads.add_labels(item.id, ["landed"])
+            commit_ledger_changes(root, f"Close c3x task {item.id}")
+            record.status = "landed"
+            record.outcome = "landed"
+            record.finished_at = _now()
+            record.save(run_record_path(root, item.id))
+            console.print(f"[green]Landed[/green] {item.id}")
+            if cleanup_done:
+                remove_worktree(root, Path(record.worktree))
+                delete_branch(root, record.branch)
+                console.print(f"[green]Cleaned[/green] {item.id}")
+        except (BeadsError, GitError, ValueError) as exc:
+            beads.add_note(item.id, f"c3x auto-land blocked: {exc}")
+            beads.add_labels(item.id, ["flow", "blocked", "land-blocked"])
+            console.print(f"[yellow]Land blocked[/yellow] {item.id}: {exc}")
 
 
 def _critic_tick(beads: Beads) -> None:

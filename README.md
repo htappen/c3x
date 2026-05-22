@@ -33,41 +33,48 @@ This creates:
 
 ## Tutorial
 
-Add raw feedback:
+Start the autonomous watcher in one terminal:
+
+```bash
+c3x watch
+```
+
+`c3x watch` imports completed worker results, plans clarified feedback, dispatches ready work, reviews completed work, lands reviewed branches into the current root branch, and cleans up landed worktrees.
+
+In another terminal, add raw feedback:
 
 ```bash
 c3x add "checkout page flashes empty cart on refresh"
 ```
 
-Let the architect pass convert inbox feedback into ready work:
+By default, `c3x add` validates the feedback synchronously. If the feedback is too vague, it creates a durable human-clarification question, asks for an answer in the terminal, records that answer, closes the question, and then continues planning.
+
+Use fire-and-forget mode when you want the watcher to pick it up later:
+
+```bash
+c3x add --no-validate "checkout page flashes empty cart on refresh"
+```
+
+Find or resume outstanding clarification:
+
+```bash
+c3x questions
+c3x clarify
+c3x answer <question-id> "preserve all cart items after reload"
+```
+
+Manual commands remain available when you want to step through the pipeline:
 
 ```bash
 c3x run --once
 c3x status
-```
-
-Start a ready task:
-
-```bash
 c3x start <task-id>
-```
-
-`c3x` creates a branch, creates a worktree, writes a worker prompt, launches the configured Codex-compatible command, and waits for `.flow/runs/<task-id>/result.json`.
-
-Import completed worker output:
-
-```bash
-c3x run --once
-c3x agents
-```
-
-Review and land:
-
-```bash
 c3x review <task-id>
 c3x land <task-id>
 c3x cleanup <task-id>
 ```
+
+`c3x` creates a branch, creates a worktree, writes a worker prompt, launches the configured Codex-compatible command, waits for `.flow/runs/<task-id>/result.json`, reviews the result, merges the branch, and removes landed worktrees.
 
 Check agent effectiveness:
 

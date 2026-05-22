@@ -32,6 +32,7 @@ c3x init
 c3x add "task description"
 c3x inbox
 c3x status
+. .venv/bin/activate
 pytest
 ```
 
@@ -80,3 +81,5 @@ Do not overwrite user work. Before editing, check `git status --short`. Keep dow
 Generated validation state belongs under `.tmp/validation`; do not create ad hoc temp projects in the repository root.
 
 Automatically commit after each major piece of work unless the user asks not to. Run relevant tests first, stage only intended files, and use a concise imperative message.
+
+Before running `pytest`, activate the repository virtualenv with `. .venv/bin/activate` so tests use the project dependencies.
