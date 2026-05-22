@@ -7,7 +7,7 @@ from pathlib import Path
 from c3x.beads import BeadSummary
 from c3x.config import C3xConfig
 from c3x.gitops import create_worktree, task_branch
-from c3x.paths import last_message_path, prompt_path, result_path, run_record_path, worktrees_dir
+from c3x.paths import last_message_path, prompt_path, result_path, run_record_path, runs_dir, worktrees_dir
 from c3x.schema import RunRecord
 
 
@@ -16,6 +16,7 @@ class AgentError(RuntimeError):
 
 
 def start_worker(root: Path, config: C3xConfig, task: BeadSummary) -> RunRecord:
+    attempt = _next_attempt(root, task.id)
     branch = task_branch(task.id, task.title)
     worktree = worktrees_dir(root) / branch.replace("/", "-")
     create_worktree(root, branch, worktree)
@@ -43,6 +44,7 @@ def start_worker(root: Path, config: C3xConfig, task: BeadSummary) -> RunRecord:
         result=str(result),
         last_message=str(last_message),
         pid=process.pid,
+        attempt=attempt,
     )
     record.save(run_path)
     return record
@@ -69,6 +71,18 @@ def _agent_command(
     return [*executable, *args]
 
 
+def _next_attempt(root: Path, task_id: str) -> int:
+    attempts = 0
+    for path in sorted(runs_dir(root).glob("*/run.json")):
+        try:
+            record = RunRecord.load(path)
+        except Exception:
+            continue
+        if record.task_id == task_id:
+            attempts = max(attempts, record.attempt)
+    return attempts + 1
+
+
 def _worker_prompt(task: BeadSummary, result: Path) -> str:
     return f"""# c3x worker task
 
@@ -86,12 +100,18 @@ Required result shape:
   "task_id": "{task.id}",
   "status": "completed",
   "summary": "What changed",
+  "task_kind": "feature|bug|test|refactor|docs|infra|spike",
+  "attempt": 1,
   "changed_files": [],
   "verification": [],
   "blockers": [],
+  "blocker_category": null,
   "proposed_tasks": [],
-  "scope_expansion": []
+  "scope_expansion": [],
+  "confidence": "high",
+  "unfinished": []
 }}
 ```
-"""
 
+If stuck, set `status` to `blocked` or `failed`, fill `blocker_category`, `blockers`, and `unfinished`, and do not pretend the task is solved.
+"""

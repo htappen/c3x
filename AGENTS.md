@@ -7,7 +7,7 @@ This repository contains `c3x`, the Python CLI for the `flow-mode` local agentic
 - `docs/architecture.md`: high-level system design and agent roles.
 - `docs/plan.md`: phased implementation plan.
 - `docs/testing-guidelines.md`: testing strategy for `flow-mode` itself.
-- `docs/verify-skill-guidelines.md`: guidelines for the downstream verification skill.
+- `docs/agent-telemetry.md`: Beads labels and metrics commands.
 
 Current and planned layout:
 
@@ -15,7 +15,7 @@ Current and planned layout:
 - `tests/`: unit, integration, and CLI tests.
 - `tests/fixtures/`: fake `codex`, temp repo fixtures, and test data.
 - `scripts/setup.sh`: installs Beads if needed and sets up the Python dev environment.
-- `skills/flow-*/`: Codex skill instructions for c3x architect, worker, reviewer, critic, and verify roles.
+- `skills/flow-*/`: Codex skill instructions. The verify skill keeps detailed guidelines under `skills/flow-verify/reference/`.
 
 ## Build, Test, and Development Commands
 
@@ -75,7 +75,7 @@ Pull requests should include a clear summary, linked Beads task or issue when av
 
 ## Agent-Specific Instructions
 
-Do not overwrite user work. Before editing, check `git status --short`. Keep `docs/verify-skill-guidelines.md` focused on downstream project verification and `docs/testing-guidelines.md` focused on testing `flow-mode` itself.
+Do not overwrite user work. Before editing, check `git status --short`. Keep downstream verification guidance inside `skills/flow-verify/reference/` and keep `docs/testing-guidelines.md` focused on testing `flow-mode` itself.
 
 Generated validation state belongs under `.tmp/validation`; do not create ad hoc temp projects in the repository root.
 

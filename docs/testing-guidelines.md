@@ -2,7 +2,7 @@
 
 These guidelines cover testing `flow-mode` itself: the CLI, supervisor loop, Beads integration, worktree orchestration, agent lifecycle, result ingestion, review gates, merge behavior, and recovery paths.
 
-The verification skill for downstream projects is covered separately in `docs/verify-skill-guidelines.md`.
+The verification skill for downstream projects is covered separately in `skills/flow-verify/reference/verify-skill-guidelines.md`.
 
 ## Goals
 

@@ -15,6 +15,8 @@ Find systemic friction in the agent workflow.
 - Repeated scope expansion requests.
 - Long-running tasks with similar causes.
 - Review failures caused by missing evidence.
+- High retry counts before landing.
+- Repeated `blocker_category` values in worker results.
+- Tasks with `unfinished` entries or low confidence.
 
 Create concrete improvement tasks with acceptance criteria. Do not produce vague findings like "improve tests".
-

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -20,11 +21,16 @@ class WorkerResult(BaseModel):
     task_id: str
     status: Literal["completed", "blocked", "failed"]
     summary: str = ""
+    task_kind: str | None = None
+    attempt: int | None = None
     changed_files: list[str] = Field(default_factory=list)
     verification: list[VerificationCommand] = Field(default_factory=list)
     blockers: list[str] = Field(default_factory=list)
+    blocker_category: str | None = None
     proposed_tasks: list[str] = Field(default_factory=list)
     scope_expansion: list[str] = Field(default_factory=list)
+    confidence: Literal["low", "medium", "high"] | None = None
+    unfinished: list[str] = Field(default_factory=list)
 
 
 class RunRecord(BaseModel):
@@ -36,6 +42,10 @@ class RunRecord(BaseModel):
     last_message: str
     status: RunStatus = "running"
     pid: int | None = None
+    attempt: int = 1
+    started_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    finished_at: str | None = None
+    outcome: str | None = None
 
     @classmethod
     def load(cls, path: Path) -> "RunRecord":
@@ -44,4 +54,3 @@ class RunRecord(BaseModel):
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(self.model_dump_json(indent=2) + "\n", encoding="utf-8")
-

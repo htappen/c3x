@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
 
@@ -12,6 +13,7 @@ from c3x.agent import AgentError, start_worker
 from c3x.beads import Beads, BeadsError, BeadSummary
 from c3x.config import FLOW_DIR, load_config, write_default_config
 from c3x.gitops import GitError, commit_ledger_changes, delete_branch, merge_branch, remove_worktree
+from c3x.metrics import collect_metrics
 from c3x.paths import pause_path, result_path, run_record_path
 from c3x.schema import RunRecord, WorkerResult
 from c3x.verify import run_verification
@@ -174,8 +176,9 @@ def start(
         task = beads.show(task_id)
         record = start_worker(root, config, task)
         beads.set_status(task_id, "in_progress")
-        beads.add_labels(task_id, ["flow", "running"])
+        beads.add_labels(task_id, ["flow", "running", f"attempt-{record.attempt}"])
         beads.remove_labels(task_id, ["ready", "reviewing", "blocked"])
+        beads.add_note(task_id, f"c3x attempt {record.attempt} started")
     except (AgentError, BeadsError, GitError) as exc:
         raise typer.Exit(_error(str(exc))) from exc
     console.print(f"[green]Started[/green] {task_id}")
@@ -195,6 +198,29 @@ def agents() -> None:
     for record in records:
         table.add_row(record.task_id, record.status, "" if record.pid is None else str(record.pid), record.branch)
     console.print(table)
+
+
+@app.command()
+def metrics(
+    json_output: Annotated[bool, typer.Option("--json", help="Emit machine-readable JSON.")] = False,
+) -> None:
+    """Summarize agent outcomes, retries, unfinished work, and blockers."""
+    data = collect_metrics(_root())
+    if json_output:
+        console.print_json(data=data)
+        return
+    table = Table(title="c3x metrics")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    table.add_row("Total tasks attempted", str(data["total_tasks"]))
+    table.add_row("Total runs", str(data["total_runs"]))
+    table.add_row("Rejected or blocked tasks", str(data["rejected_or_blocked"]))
+    table.add_row("Unfinished tasks", str(data["unfinished"]))
+    table.add_row("Avg attempts to land", str(data["avg_attempts_to_land"]))
+    console.print(table)
+    _print_counter("Run outcomes", data["outcomes"])
+    _print_counter("Task kinds", data["task_kinds"])
+    _print_counter("Blocker categories", data["blocker_categories"])
 
 
 @app.command()
@@ -232,6 +258,7 @@ def review(
         beads.remove_labels(task_id, ["running", "blocked"])
         record = RunRecord.load(run_record_path(root, task_id))
         record.status = "reviewed"
+        record.outcome = "reviewed"
         record.save(run_record_path(root, task_id))
     except (BeadsError, ValueError) as exc:
         raise typer.Exit(_error(str(exc))) from exc
@@ -254,6 +281,8 @@ def land(
         beads.add_labels(task_id, ["landed"])
         commit_ledger_changes(root, f"Close c3x task {task_id}")
         record.status = "landed"
+        record.outcome = "landed"
+        record.finished_at = _now()
         record.save(run_record_path(root, task_id))
     except (BeadsError, GitError, ValueError) as exc:
         raise typer.Exit(_error(str(exc))) from exc
@@ -424,18 +453,23 @@ def _import_finished_results(root: Path, beads: Beads) -> None:
         result = WorkerResult.model_validate_json(result_file.read_text(encoding="utf-8"))
         if result.task_id != record.task_id:
             beads.add_note(record.task_id, "Worker result rejected: task id mismatch")
-            beads.add_labels(record.task_id, ["flow", "blocked"])
+            beads.add_labels(record.task_id, ["flow", "blocked", "rejected", "blocker-result-schema"])
             record.status = "blocked"
+            record.outcome = "rejected"
         elif result.status == "completed":
-            beads.add_note(record.task_id, f"Worker completed: {result.summary}")
-            beads.add_labels(record.task_id, ["flow", "reviewing"])
+            beads.add_note(record.task_id, _result_note(result))
+            beads.add_labels(record.task_id, ["flow", "reviewing", "completed-by-agent"])
             beads.remove_labels(record.task_id, ["running", "blocked"])
             record.status = "completed"
+            record.outcome = "completed"
         else:
-            beads.add_note(record.task_id, f"Worker blocked: {result.summary}")
-            beads.add_labels(record.task_id, ["flow", "blocked"])
+            beads.add_note(record.task_id, _result_note(result))
+            category = result.blocker_category or "unknown"
+            beads.add_labels(record.task_id, ["flow", "blocked", f"blocker-{category}"])
             beads.remove_labels(record.task_id, ["running", "reviewing"])
             record.status = "blocked"
+            record.outcome = result.status
+        record.finished_at = _now()
         record.save(run_record_path(root, record.task_id))
 
 
@@ -466,6 +500,15 @@ def _print_verification(results: list) -> None:
     console.print(table)
 
 
+def _print_counter(title: str, values: dict) -> None:
+    table = Table(title=title)
+    table.add_column("Name")
+    table.add_column("Count", justify="right")
+    for name, count in sorted(values.items()):
+        table.add_row(str(name), str(count))
+    console.print(table)
+
+
 def _run_records(root: Path) -> list[RunRecord]:
     records = []
     for path in sorted((root / FLOW_DIR / "runs").glob("*/run.json")):
@@ -475,6 +518,26 @@ def _run_records(root: Path) -> list[RunRecord]:
 
 def _with_labels(items: list[BeadSummary], labels: set[str]) -> list[BeadSummary]:
     return [item for item in items if labels.issubset(set(item.labels))]
+
+
+def _result_note(result: WorkerResult) -> str:
+    lines = [
+        f"Worker {result.status}: {result.summary}",
+        f"task_kind: {result.task_kind or 'unspecified'}",
+        f"attempt: {result.attempt or 'unspecified'}",
+        f"confidence: {result.confidence or 'unspecified'}",
+    ]
+    if result.blocker_category:
+        lines.append(f"blocker_category: {result.blocker_category}")
+    if result.blockers:
+        lines.append("blockers:\n- " + "\n- ".join(result.blockers))
+    if result.unfinished:
+        lines.append("unfinished:\n- " + "\n- ".join(result.unfinished))
+    return "\n".join(lines)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _error(message: str) -> int:

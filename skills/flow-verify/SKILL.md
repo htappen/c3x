@@ -18,3 +18,7 @@ Prefer executable commands over prose confidence. A useful verification contract
 - Artifact capture for failures.
 
 When verification is missing, create a task to add it instead of treating manual inspection as sufficient.
+
+## Detailed Guidance
+
+Read `reference/verify-skill-guidelines.md` when defining a verification contract, reviewing test sufficiency, handling web-app flows, or creating testability improvement tasks.
