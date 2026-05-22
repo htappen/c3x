@@ -30,6 +30,11 @@ def changed_files(root: Path, base: str = "HEAD") -> list[str]:
     return [line for line in result.stdout.splitlines() if line.strip()]
 
 
+def current_branch(root: Path) -> str:
+    result = _git(root, ["rev-parse", "--abbrev-ref", "HEAD"], capture=True)
+    return result.stdout.strip()
+
+
 def merge_branch(root: Path, branch: str) -> None:
     commit_ledger_changes(root, "Checkpoint c3x ledger before merge")
     _git(root, ["merge", "--no-ff", branch, "-m", f"Merge {branch}"])

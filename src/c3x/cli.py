@@ -12,7 +12,14 @@ from rich.table import Table
 from c3x.agent import AgentError, start_worker
 from c3x.beads import Beads, BeadsError, BeadSummary
 from c3x.config import FLOW_DIR, load_config, write_default_config
-from c3x.gitops import GitError, commit_ledger_changes, delete_branch, merge_branch, remove_worktree
+from c3x.gitops import (
+    GitError,
+    commit_ledger_changes,
+    current_branch,
+    delete_branch,
+    merge_branch,
+    remove_worktree,
+)
 from c3x.metrics import collect_metrics
 from c3x.paths import pause_path, result_path, run_record_path
 from c3x.schema import RunRecord, WorkerResult
@@ -170,6 +177,7 @@ def start(
 ) -> None:
     """Start one worker in an isolated git worktree."""
     root = _root()
+    _warn_if_risky_flow_branch(root)
     config = load_config(root)
     beads = _beads(root)
     try:
@@ -271,6 +279,7 @@ def land(
 ) -> None:
     """Merge a reviewed task branch and close the bead."""
     root = _root()
+    _warn_if_risky_flow_branch(root)
     try:
         record = RunRecord.load(run_record_path(root, task_id))
         if record.status != "reviewed":
@@ -381,6 +390,7 @@ def _supervisor_tick(root: Path, *, dispatch: bool) -> None:
     _plan_inbox(root, beads)
     _critic_tick(beads)
     if dispatch:
+        _warn_if_risky_flow_branch(root)
         config = load_config(root)
         running = len(_with_labels(beads.list_active(), {"flow", "running"}))
         slots = max(config.limits.max_parallel_workers - running, 0)
@@ -518,6 +528,16 @@ def _run_records(root: Path) -> list[RunRecord]:
 
 def _with_labels(items: list[BeadSummary], labels: set[str]) -> list[BeadSummary]:
     return [item for item in items if labels.issubset(set(item.labels))]
+
+
+def _warn_if_risky_flow_branch(root: Path) -> None:
+    branch = current_branch(root)
+    if branch not in {"main", "master", "HEAD"}:
+        return
+    console.print(
+        "[yellow]warning:[/yellow] "
+        f"c3x root worktree is on `{branch}`. Task branches will fork from and merge back into this branch."
+    )
 
 
 def _result_note(result: WorkerResult) -> str:
