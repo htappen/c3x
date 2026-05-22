@@ -8,6 +8,7 @@ from c3x.beads import BeadSummary
 from c3x.config import C3xConfig
 from c3x.gitops import create_worktree, task_branch
 from c3x.paths import last_message_path, prompt_path, result_path, run_record_path, runs_dir, worktrees_dir
+from c3x.prompt_policy import caveman_mode_text
 from c3x.schema import RunRecord
 
 
@@ -84,7 +85,9 @@ def _next_attempt(root: Path, task_id: str) -> int:
 
 
 def _worker_prompt(task: BeadSummary, result: Path) -> str:
-    return f"""# c3x worker task
+    return f"""{caveman_mode_text()}
+
+# c3x worker task
 
 Task: {task.id}
 Title: {task.title}

@@ -1,7 +1,9 @@
 from pathlib import Path
 
 from c3x.agent import _agent_command
+from c3x.agent import _worker_prompt
 from c3x.config import C3xConfig
+from c3x.beads import BeadSummary
 
 
 def test_agent_command_substitutes_runtime_paths(tmp_path: Path) -> None:
@@ -32,3 +34,12 @@ def test_agent_command_substitutes_runtime_paths(tmp_path: Path) -> None:
         str(tmp_path / "result.json"),
     ]
 
+
+def test_worker_prompt_includes_caveman_mode(tmp_path: Path) -> None:
+    prompt = _worker_prompt(
+        BeadSummary(id="bd-1", title="Fix auth"),
+        tmp_path / "result.json",
+    )
+
+    assert "CAVEMAN MODE ACTIVE" in prompt
+    assert "Task: bd-1" in prompt

@@ -139,6 +139,7 @@ pytest
 
 Codex role guidance lives in `skills/`:
 
+- `flow-shared`
 - `flow-architect`
 - `flow-worker`
 - `flow-reviewer`
@@ -146,6 +147,8 @@ Codex role guidance lives in `skills/`:
 - `flow-verify`
 
 Detailed downstream verification guidance lives at `skills/flow-verify/reference/verify-skill-guidelines.md`.
+
+`flow-shared` carries the caveman-mode communication policy. c3x also injects that policy into worker prompts through `src/c3x/prompts/caveman_mode.md`, and `.codex/hooks.json` enables it for repo-local Codex sessions.
 
 ## Current Gaps
 

@@ -7,6 +7,8 @@ description: Use when analyzing repeated c3x worker failures, blocked tasks, slo
 
 Find systemic friction in the agent workflow.
 
+Use `flow-shared` communication policy for findings and improvement tasks.
+
 ## Look For
 
 - Repeated setup failures.

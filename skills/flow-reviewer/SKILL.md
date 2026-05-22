@@ -7,6 +7,8 @@ description: Use when reviewing a completed c3x worker result and deciding wheth
 
 Review completed worker output conservatively.
 
+Use `flow-shared` communication policy for review summaries and rejection reasons.
+
 ## Gates
 
 Block landing when:
@@ -19,4 +21,3 @@ Block landing when:
 - The result relies on unverifiable manual inspection.
 
 Approve only when the branch satisfies the task and leaves clear evidence.
-

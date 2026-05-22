@@ -7,6 +7,8 @@ description: Use when implementing exactly one c3x Beads task in an isolated git
 
 Complete one assigned task in the current worktree.
 
+Use `flow-shared` communication policy for summaries and blocker reports.
+
 ## Rules
 
 - Work only on the assigned task.

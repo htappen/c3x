@@ -7,6 +7,8 @@ description: Use when refining raw c3x inbox ideas into actionable Beads tasks w
 
 Convert vague feedback into small, testable Beads tasks.
 
+Use `flow-shared` communication policy for user-facing questions, summaries, and blockers.
+
 ## Workflow
 
 1. Read c3x inbox items and any human answers.
@@ -27,4 +29,3 @@ Each ready task should state:
 - Known blockers or dependencies.
 
 If a task cannot be verified automatically, create a verification-improvement task first or explicitly record the gap.
-

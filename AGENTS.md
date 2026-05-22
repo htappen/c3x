@@ -15,7 +15,7 @@ Current and planned layout:
 - `tests/`: unit, integration, and CLI tests.
 - `tests/fixtures/`: fake `codex`, temp repo fixtures, and test data.
 - `scripts/setup.sh`: installs Beads if needed and sets up the Python dev environment.
-- `skills/flow-*/`: Codex skill instructions. The verify skill keeps detailed guidelines under `skills/flow-verify/reference/`.
+- `skills/flow-*/`: Codex skill instructions. `flow-shared` contains caveman mode. The verify skill keeps detailed guidelines under `skills/flow-verify/reference/`.
 
 ## Build, Test, and Development Commands
 

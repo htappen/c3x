@@ -7,6 +7,8 @@ description: Use when defining or improving project verification contracts for c
 
 Define how agents prove work is correct.
 
+Use `flow-shared` communication policy for verification summaries and gaps.
+
 ## Contract
 
 Prefer executable commands over prose confidence. A useful verification contract includes:
