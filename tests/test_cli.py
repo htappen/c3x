@@ -442,7 +442,6 @@ def test_squash_task_squashes_landed_tip_segment(monkeypatch, tmp_path: Path) ->
     }
     monkeypatch.setattr(cli, "_root", lambda: tmp_path)
     monkeypatch.setattr(cli, "ensure_rewrite_safe", lambda root: None)
-    monkeypatch.setattr(cli, "is_ancestor", lambda root, ancestor, descendant: True)
     monkeypatch.setattr(cli, "rev_parse", lambda root, rev: "head")
     monkeypatch.setattr(cli, "commit_subject", lambda root, rev: subjects[rev])
     monkeypatch.setattr(cli, "commit_parents", lambda root, rev: parents[rev])
@@ -453,6 +452,43 @@ def test_squash_task_squashes_landed_tip_segment(monkeypatch, tmp_path: Path) ->
     assert result.exit_code == 0
     assert calls == [("base", "Complete c3x task bd-1\n\nFixed it")]
     assert "Squashed bd-1: 2 commits" in result.stdout
+
+
+def test_squash_task_does_not_require_task_branch_ref(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    calls: list[tuple[str, str]] = []
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="landed",
+    ).save(run_dir / "run.json")
+    subjects = {
+        "head": "Merge c3x/bd-1-fix",
+        "close": "Close c3x task bd-1",
+        "base": "Previous work",
+    }
+    parents = {
+        "head": ["close", "worker"],
+        "close": ["base"],
+        "base": [],
+    }
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "ensure_rewrite_safe", lambda root: None)
+    monkeypatch.setattr(cli, "is_ancestor", lambda root, ancestor, descendant: (_ for _ in ()).throw(Exception("missing ref")))
+    monkeypatch.setattr(cli, "rev_parse", lambda root, rev: "head")
+    monkeypatch.setattr(cli, "commit_subject", lambda root, rev: subjects[rev])
+    monkeypatch.setattr(cli, "commit_parents", lambda root, rev: parents[rev])
+    monkeypatch.setattr(cli, "squash_head_to", lambda root, base, message: calls.append((base, message)))
+
+    result = runner.invoke(cli.app, ["squash", "bd-1"])
+
+    assert result.exit_code == 0
+    assert calls == [("base", "Complete c3x task bd-1")]
 
 
 def test_squash_all_squashes_eligible_landed_tip_segment(monkeypatch, tmp_path: Path) -> None:
@@ -480,7 +516,6 @@ def test_squash_all_squashes_eligible_landed_tip_segment(monkeypatch, tmp_path: 
     }
     monkeypatch.setattr(cli, "_root", lambda: tmp_path)
     monkeypatch.setattr(cli, "ensure_rewrite_safe", lambda root: None)
-    monkeypatch.setattr(cli, "is_ancestor", lambda root, ancestor, descendant: True)
     monkeypatch.setattr(cli, "rev_parse", lambda root, rev: "head")
     monkeypatch.setattr(cli, "commit_subject", lambda root, rev: subjects[rev])
     monkeypatch.setattr(cli, "commit_parents", lambda root, rev: parents[rev])

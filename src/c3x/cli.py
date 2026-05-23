@@ -812,8 +812,6 @@ def _first_squash_plan_for_head(root: Path, records: list[RunRecord], rev: str) 
 
 
 def _squash_plan_for_head(root: Path, record: RunRecord, rev: str) -> SquashPlan | None:
-    if not is_ancestor(root, record.branch, rev):
-        return None
     current = rev_parse(root, rev)
     commits: list[str] = []
     subjects: list[str] = []
