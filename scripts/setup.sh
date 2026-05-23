@@ -4,6 +4,36 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+find_bd_bin() {
+  local shim_path="$ROOT_DIR/.venv/bin/bd"
+  local candidate
+  local dir
+  local -a path_parts
+
+  # Prefer a real bd executable already on PATH, but ignore the venv shim.
+  IFS=':' read -r -a path_parts <<< "$PATH"
+  for dir in "${path_parts[@]}"; do
+    [ -n "$dir" ] || dir='.'
+    candidate="$dir/bd"
+    [ "$candidate" = "$shim_path" ] && continue
+    if [ -x "$candidate" ] && [ ! -d "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  # If setup already created the shim, keep using its real target.
+  if [ -L "$shim_path" ]; then
+    candidate="$(readlink "$shim_path" || true)"
+    if [ -n "$candidate" ] && [ "${candidate#/}" != "$candidate" ] && [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
 if ! python3 -m ensurepip --version >/dev/null 2>&1; then
   cat >&2 <<'EOF'
 python3 venv/pip support is not available.
@@ -28,7 +58,7 @@ else
   echo "bd already installed: $(bd version 2>/dev/null || true)"
 fi
 
-BD_BIN="$(command -v bd || true)"
+BD_BIN="$(find_bd_bin || true)"
 if [ -z "$BD_BIN" ]; then
   cat >&2 <<'EOF'
 `bd` installed, but it is still not on PATH.
