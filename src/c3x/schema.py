@@ -4,7 +4,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 RunStatus = Literal["running", "completed", "blocked", "failed", "reviewed", "landed"]
@@ -31,6 +31,19 @@ class WorkerResult(BaseModel):
     scope_expansion: list[str] = Field(default_factory=list)
     confidence: Literal["low", "medium", "high"] | None = None
     unfinished: list[str] = Field(default_factory=list)
+
+    @field_validator("verification", mode="before")
+    @classmethod
+    def _normalize_verification(cls, value: object) -> object:
+        if not isinstance(value, list):
+            return value
+        normalized: list[object] = []
+        for item in value:
+            if isinstance(item, str):
+                normalized.append({"command": item, "status": "passed"})
+            else:
+                normalized.append(item)
+        return normalized
 
 
 class RunRecord(BaseModel):

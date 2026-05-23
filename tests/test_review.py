@@ -14,6 +14,19 @@ def test_review_allows_completed_result() -> None:
     _review_result(result)
 
 
+def test_worker_result_accepts_string_verification_commands() -> None:
+    result = WorkerResult.model_validate(
+        {
+            "task_id": "bd-1",
+            "status": "completed",
+            "verification": ["pytest"],
+        }
+    )
+
+    assert result.verification[0].command == "pytest"
+    assert result.verification[0].status == "passed"
+
+
 def test_review_blocks_failed_verification() -> None:
     result = WorkerResult(
         task_id="bd-1",
@@ -23,4 +36,3 @@ def test_review_blocks_failed_verification() -> None:
 
     with pytest.raises(ValueError, match="verification failed"):
         _review_result(result)
-
