@@ -5,7 +5,7 @@ from typer.testing import CliRunner
 
 from c3x import cli
 from c3x.beads import BeadSummary
-from c3x.schema import RunRecord
+from c3x.schema import RunRecord, WorkerResult
 
 
 class _FakeBeads:
@@ -267,3 +267,40 @@ def test_import_blocks_exited_worker_missing_result(monkeypatch, tmp_path: Path)
     assert ("bd-1", ["flow", "blocked", "blocker-result-missing"]) in beads.added_labels
     assert ("bd-1", ["running", "reviewing"]) in beads.removed_labels
     assert any("Could not write result.json" in note for _, note in beads.notes)
+
+
+def test_import_copies_worktree_result_to_run_directory(tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", labels=("flow", "running"))
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    worker_result = worktree / ".c3x" / "result.json"
+    worker_result.parent.mkdir(parents=True)
+    worker_result.write_text(
+        WorkerResult(
+            task_id="bd-1",
+            status="completed",
+            summary="Fixed it",
+            task_kind="bug",
+            confidence="high",
+        ).model_dump_json(),
+        encoding="utf-8",
+    )
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(worker_result),
+        last_message=str(run_dir / "last-message.md"),
+        pid=12345,
+    ).save(run_dir / "run.json")
+
+    cli._import_finished_results(tmp_path, beads)
+
+    canonical_result = tmp_path / ".flow" / "runs" / "bd-1" / "result.json"
+    saved = RunRecord.load(run_dir / "run.json")
+    assert canonical_result.exists()
+    assert WorkerResult.model_validate_json(canonical_result.read_text(encoding="utf-8")).summary == "Fixed it"
+    assert saved.status == "completed"
+    assert ("bd-1", ["flow", "reviewing", "completed-by-agent"]) in beads.added_labels

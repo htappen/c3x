@@ -7,7 +7,7 @@ from pathlib import Path
 from c3x.beads import BeadSummary
 from c3x.config import C3xConfig
 from c3x.gitops import create_worktree, task_branch
-from c3x.paths import last_message_path, prompt_path, result_path, run_record_path, runs_dir, worktrees_dir
+from c3x.paths import last_message_path, prompt_path, run_record_path, runs_dir, worktrees_dir
 from c3x.prompt_policy import caveman_mode_text
 from c3x.schema import RunRecord
 
@@ -24,9 +24,10 @@ def start_worker(root: Path, config: C3xConfig, task: BeadSummary) -> RunRecord:
 
     run_path = run_record_path(root, task.id)
     prompt = prompt_path(root, task.id)
-    result = result_path(root, task.id)
+    result = worktree / ".c3x" / "result.json"
     last_message = last_message_path(root, task.id)
     prompt.parent.mkdir(parents=True, exist_ok=True)
+    result.parent.mkdir(parents=True, exist_ok=True)
     prompt.write_text(_worker_prompt(task, result), encoding="utf-8")
 
     command = _agent_command(config, worktree, prompt, result, last_message)

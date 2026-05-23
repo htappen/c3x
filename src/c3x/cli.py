@@ -687,19 +687,22 @@ def _import_finished_results(root: Path, beads: Beads) -> None:
             if record.pid is not None and not _process_is_running(record.pid):
                 _block_missing_worker_result(root, beads, record)
             continue
-        result = WorkerResult.model_validate_json(result_file.read_text(encoding="utf-8"))
+        result_text = result_file.read_text(encoding="utf-8")
+        result = WorkerResult.model_validate_json(result_text)
         if result.task_id != record.task_id:
             beads.add_note(record.task_id, "Worker result rejected: task id mismatch")
             beads.add_labels(record.task_id, ["flow", "blocked", "rejected", "blocker-result-schema"])
             record.status = "blocked"
             record.outcome = "rejected"
         elif result.status == "completed":
+            _save_canonical_result(root, record.task_id, result_text)
             beads.add_note(record.task_id, _result_note(result))
             beads.add_labels(record.task_id, ["flow", "reviewing", "completed-by-agent"])
             beads.remove_labels(record.task_id, ["running", "blocked"])
             record.status = "completed"
             record.outcome = "completed"
         else:
+            _save_canonical_result(root, record.task_id, result_text)
             beads.add_note(record.task_id, _result_note(result))
             category = result.blocker_category or "unknown"
             beads.add_labels(record.task_id, ["flow", "blocked", f"blocker-{category}"])
@@ -708,6 +711,12 @@ def _import_finished_results(root: Path, beads: Beads) -> None:
             record.outcome = result.status
         record.finished_at = _now()
         record.save(run_record_path(root, record.task_id))
+
+
+def _save_canonical_result(root: Path, task_id: str, result_text: str) -> None:
+    path = result_path(root, task_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(result_text, encoding="utf-8")
 
 
 def _block_missing_worker_result(root: Path, beads: Beads, record: RunRecord) -> None:
@@ -763,6 +772,11 @@ def _process_is_running(pid: int) -> bool:
 
 def _load_worker_result(root: Path, task_id: str) -> WorkerResult:
     path = result_path(root, task_id)
+    if not path.exists():
+        record_path = run_record_path(root, task_id)
+        if record_path.exists():
+            record = RunRecord.load(record_path)
+            path = Path(record.result)
     if not path.exists():
         raise ValueError(f"missing worker result: {path}")
     return WorkerResult.model_validate_json(path.read_text(encoding="utf-8"))
