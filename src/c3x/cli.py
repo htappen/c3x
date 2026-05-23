@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import shutil
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
@@ -34,6 +36,16 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+
+
+@dataclass(frozen=True)
+class CleanupAction:
+    task_id: str
+    run_dir: Path
+    worktree: Path
+    branch: str
+    reason: str
+    remove_run_dir: bool = False
 
 
 def _root() -> Path:
@@ -386,19 +398,31 @@ def land(
 
 @app.command()
 def cleanup(
-    task_id: Annotated[str, typer.Argument(help="Landed task id to clean up.")],
+    task_id: Annotated[str | None, typer.Argument(help="Optional task id to clean up.")] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Show cleanup candidates without removing anything."),
+    ] = False,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Force-remove dirty stale worktrees and unmerged stale branches."),
+    ] = False,
 ) -> None:
-    """Remove a landed task worktree and branch."""
+    """Remove landed task worktrees and superseded stale attempts."""
     root = _root()
     try:
-        record = RunRecord.load(run_record_path(root, task_id))
-        if record.status != "landed":
-            raise ValueError(f"{task_id} is not landed")
-        remove_worktree(root, Path(record.worktree))
-        delete_branch(root, record.branch)
+        actions = _cleanup_actions(root, task_id=task_id)
+        if not actions:
+            console.print("[green]Nothing to clean.[/green]")
+            return
+        for action in actions:
+            if dry_run:
+                console.print(f"[yellow]Would clean[/yellow] {action.reason}: {action.task_id}")
+                continue
+            _run_cleanup_action(root, action, force=force)
+            console.print(f"[green]Cleaned[/green] {action.reason}: {action.task_id}")
     except (GitError, ValueError) as exc:
         raise typer.Exit(_error(str(exc))) from exc
-    console.print(f"[green]Cleaned[/green] {task_id}")
 
 
 @app.command()
@@ -707,6 +731,64 @@ def _retry_removed_labels(task: BeadSummary) -> list[str]:
     return sorted(labels)
 
 
+def _cleanup_actions(root: Path, *, task_id: str | None) -> list[CleanupAction]:
+    records = _run_record_paths(root)
+    canonical = {
+        record.task_id: record
+        for path, record in records
+        if path == run_record_path(root, record.task_id)
+    }
+    actions: list[CleanupAction] = []
+    for path, record in records:
+        if task_id and record.task_id != task_id:
+            continue
+        run_dir = path.parent
+        if path == run_record_path(root, record.task_id):
+            if record.status == "landed":
+                actions.append(
+                    CleanupAction(
+                        task_id=record.task_id,
+                        run_dir=run_dir,
+                        worktree=Path(record.worktree),
+                        branch=record.branch,
+                        reason="landed worktree",
+                    )
+                )
+            continue
+        current = canonical.get(record.task_id)
+        if _is_superseded_attempt(record, current):
+            actions.append(
+                CleanupAction(
+                    task_id=record.task_id,
+                    run_dir=run_dir,
+                    worktree=Path(record.worktree),
+                    branch=record.branch,
+                    reason=f"superseded attempt {record.attempt}",
+                    remove_run_dir=True,
+                )
+            )
+    if task_id and not actions:
+        current = canonical.get(task_id)
+        if current and current.status != "landed":
+            raise ValueError(f"{task_id} is not landed and has no superseded attempts")
+    return actions
+
+
+def _is_superseded_attempt(record: RunRecord, current: RunRecord | None) -> bool:
+    if current is None:
+        return False
+    if current.attempt <= record.attempt:
+        return False
+    return current.status in {"completed", "reviewed", "landed"}
+
+
+def _run_cleanup_action(root: Path, action: CleanupAction, *, force: bool) -> None:
+    remove_worktree(root, action.worktree, force=force)
+    delete_branch(root, action.branch, force=force)
+    if action.remove_run_dir and action.run_dir.exists():
+        shutil.rmtree(action.run_dir)
+
+
 def _auto_review(root: Path, beads: Beads) -> None:
     for item in _with_labels(beads.list_active(), {"flow", "reviewing"}):
         if "reviewed" in item.labels:
@@ -912,9 +994,13 @@ def _print_counter(title: str, values: dict) -> None:
 
 
 def _run_records(root: Path) -> list[RunRecord]:
+    return [record for _, record in _run_record_paths(root)]
+
+
+def _run_record_paths(root: Path) -> list[tuple[Path, RunRecord]]:
     records = []
     for path in sorted((root / FLOW_DIR / "runs").glob("*/run.json")):
-        records.append(RunRecord.load(path))
+        records.append((path, RunRecord.load(path)))
     return records
 
 

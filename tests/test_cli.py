@@ -393,3 +393,104 @@ def test_retry_all_retries_blocked_flow_tasks(monkeypatch, tmp_path: Path) -> No
     assert started == ["bd-1", "bd-2"]
     assert ("bd-1", "in_progress") in beads.statuses
     assert ("bd-2", "in_progress") in beads.statuses
+
+
+def test_cleanup_removes_superseded_attempt_run_directory(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    removed_worktrees: list[Path] = []
+    deleted_branches: list[str] = []
+    archived_dir = tmp_path / ".flow" / "runs" / "bd-1-attempt-1"
+    archived_dir.mkdir(parents=True)
+    archived_worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(archived_worktree),
+        prompt=str(archived_dir / "prompt.md"),
+        result=str(archived_dir / "result.json"),
+        last_message=str(archived_dir / "last-message.md"),
+        status="blocked",
+        attempt=1,
+    ).save(archived_dir / "run.json")
+    current_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix-attempt-2",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-2"),
+        prompt=str(current_dir / "prompt.md"),
+        result=str(current_dir / "result.json"),
+        last_message=str(current_dir / "last-message.md"),
+        status="completed",
+        attempt=2,
+    ).save(current_dir / "run.json")
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "remove_worktree", lambda root, worktree, force=False: removed_worktrees.append(worktree))
+    monkeypatch.setattr(cli, "delete_branch", lambda root, branch, force=False: deleted_branches.append(branch))
+
+    result = runner.invoke(cli.app, ["cleanup"])
+
+    assert result.exit_code == 0
+    assert not archived_dir.exists()
+    assert removed_worktrees == [archived_worktree]
+    assert deleted_branches == ["c3x/bd-1-fix"]
+
+
+def test_cleanup_dry_run_leaves_superseded_attempt(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    archived_dir = tmp_path / ".flow" / "runs" / "bd-1-attempt-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"),
+        prompt=str(archived_dir / "prompt.md"),
+        result=str(archived_dir / "result.json"),
+        last_message=str(archived_dir / "last-message.md"),
+        status="blocked",
+        attempt=1,
+    ).save(archived_dir / "run.json")
+    current_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix-attempt-2",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-2"),
+        prompt=str(current_dir / "prompt.md"),
+        result=str(current_dir / "result.json"),
+        last_message=str(current_dir / "last-message.md"),
+        status="reviewed",
+        attempt=2,
+    ).save(current_dir / "run.json")
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+
+    result = runner.invoke(cli.app, ["cleanup", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert archived_dir.exists()
+    assert "Would clean" in result.stdout
+
+
+def test_cleanup_removes_landed_worktree_without_deleting_current_run(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    removed_worktrees: list[Path] = []
+    deleted_branches: list[str] = []
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="landed",
+        attempt=1,
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "remove_worktree", lambda root, path, force=False: removed_worktrees.append(path))
+    monkeypatch.setattr(cli, "delete_branch", lambda root, branch, force=False: deleted_branches.append(branch))
+
+    result = runner.invoke(cli.app, ["cleanup", "bd-1"])
+
+    assert result.exit_code == 0
+    assert (run_dir / "run.json").exists()
+    assert removed_worktrees == [worktree]
+    assert deleted_branches == ["c3x/bd-1-fix"]

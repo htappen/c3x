@@ -40,13 +40,16 @@ def merge_branch(root: Path, branch: str) -> None:
     _git(root, ["merge", "--no-ff", branch, "-m", f"Merge {branch}"])
 
 
-def remove_worktree(root: Path, worktree: Path) -> None:
+def remove_worktree(root: Path, worktree: Path, *, force: bool = False) -> None:
     if worktree.exists():
-        _git(root, ["worktree", "remove", str(worktree)])
+        args = ["worktree", "remove"]
+        if force:
+            args.append("--force")
+        _git(root, [*args, str(worktree)])
 
 
-def delete_branch(root: Path, branch: str) -> None:
-    _git(root, ["branch", "-d", branch])
+def delete_branch(root: Path, branch: str, *, force: bool = False) -> None:
+    _git(root, ["branch", "-D" if force else "-d", branch])
 
 
 def commit_ledger_changes(root: Path, message: str) -> None:
