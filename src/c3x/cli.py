@@ -19,13 +19,18 @@ from c3x.config import FLOW_DIR, load_config, write_default_config
 from c3x.gitops import (
     GitError,
     branch_diff_summary,
+    commit_parents,
     commit_ledger_changes,
+    commit_subject,
     commit_worktree_changes,
     current_branch,
     delete_branch,
+    ensure_rewrite_safe,
     is_ancestor,
     merge_branch,
     remove_worktree,
+    rev_parse,
+    squash_head_to,
 )
 from c3x.metrics import collect_metrics
 from c3x.paths import pause_path, result_path, run_record_path
@@ -50,6 +55,14 @@ class CleanupAction:
     reason: str
     remove_run_dir: bool = False
     repair_merge: bool = False
+
+
+@dataclass(frozen=True)
+class SquashPlan:
+    task_id: str
+    base: str
+    commits: tuple[str, ...]
+    message: str
 
 
 def _root() -> Path:
@@ -292,6 +305,29 @@ def retry(
             console.print(f"[green]Retried[/green] {item_id} as attempt {record.attempt}")
             console.print(f"Worktree: {record.worktree}")
     except (AgentError, BeadsError, GitError, ValueError) as exc:
+        raise typer.Exit(_error(str(exc))) from exc
+
+
+@app.command()
+def squash(
+    task_id: Annotated[str | None, typer.Argument(help="Landed task id to squash.")] = None,
+    all_tasks: Annotated[
+        bool,
+        typer.Option("--all", help="Squash all eligible landed task commits at the current branch tip."),
+    ] = False,
+) -> None:
+    """Squash c3x-generated commits for landed work."""
+    root = _root()
+    try:
+        ensure_rewrite_safe(root)
+        plans = _squash_plans(root, task_id=task_id, all_tasks=all_tasks)
+        if not plans:
+            console.print("[green]Nothing to squash.[/green]")
+            return
+        for plan in plans:
+            squash_head_to(root, plan.base, plan.message)
+            console.print(f"[green]Squashed[/green] {plan.task_id}: {len(plan.commits)} commits")
+    except (GitError, ValueError) as exc:
         raise typer.Exit(_error(str(exc))) from exc
 
 
@@ -746,6 +782,79 @@ def _retry_removed_labels(task: BeadSummary) -> list[str]:
     }
     labels.update(label for label in task.labels if label.startswith("blocker-"))
     return sorted(labels)
+
+
+def _squash_plans(root: Path, *, task_id: str | None, all_tasks: bool) -> list[SquashPlan]:
+    if all_tasks and task_id:
+        raise ValueError("pass either a task id or --all, not both")
+    if not all_tasks and not task_id:
+        raise ValueError("pass a task id or --all")
+    records = [record for _, record in _run_record_paths(root) if record.status == "landed"]
+    if task_id:
+        record = next((record for record in records if record.task_id == task_id), None)
+        if record is None:
+            raise ValueError(f"{task_id} is not a landed c3x task")
+        plan = _squash_plan_for_head(root, record, "HEAD")
+        if plan is None:
+            raise ValueError(f"{task_id} has no eligible squash segment at HEAD")
+        return [plan]
+
+    plan = _first_squash_plan_for_head(root, records, "HEAD")
+    return [] if plan is None else [plan]
+
+
+def _first_squash_plan_for_head(root: Path, records: list[RunRecord], rev: str) -> SquashPlan | None:
+    for record in records:
+        plan = _squash_plan_for_head(root, record, rev)
+        if plan is not None:
+            return plan
+    return None
+
+
+def _squash_plan_for_head(root: Path, record: RunRecord, rev: str) -> SquashPlan | None:
+    if not is_ancestor(root, record.branch, rev):
+        return None
+    current = rev_parse(root, rev)
+    commits: list[str] = []
+    subjects: list[str] = []
+    while True:
+        subject = commit_subject(root, current)
+        if not _subject_belongs_to_task(record, subject):
+            break
+        commits.append(current)
+        subjects.append(subject)
+        parents = commit_parents(root, current)
+        if not parents:
+            break
+        current = parents[0]
+    if len(commits) < 2:
+        return None
+    if not any(record.task_id in subject or record.branch in subject for subject in subjects):
+        return None
+    return SquashPlan(
+        task_id=record.task_id,
+        base=current,
+        commits=tuple(commits),
+        message=_squash_message(root, record.task_id),
+    )
+
+
+def _subject_belongs_to_task(record: RunRecord, subject: str) -> bool:
+    if record.task_id in subject or record.branch in subject:
+        return True
+    return subject == "Checkpoint c3x ledger before merge"
+
+
+def _squash_message(root: Path, task_id: str) -> str:
+    path = result_path(root, task_id)
+    if path.exists():
+        try:
+            result = WorkerResult.model_validate_json(path.read_text(encoding="utf-8"))
+        except Exception:
+            result = None
+        if result and result.summary:
+            return f"Complete c3x task {task_id}\n\n{result.summary}"
+    return f"Complete c3x task {task_id}"
 
 
 def _cleanup_actions(root: Path, *, task_id: str | None) -> list[CleanupAction]:

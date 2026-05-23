@@ -413,6 +413,85 @@ def test_retry_all_retries_blocked_flow_tasks(monkeypatch, tmp_path: Path) -> No
     assert ("bd-2", "in_progress") in beads.statuses
 
 
+def test_squash_task_squashes_landed_tip_segment(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    calls: list[tuple[str, str]] = []
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="landed",
+    ).save(run_dir / "run.json")
+    (run_dir / "result.json").write_text(
+        WorkerResult(task_id="bd-1", status="completed", summary="Fixed it").model_dump_json(),
+        encoding="utf-8",
+    )
+    subjects = {
+        "head": "Merge c3x/bd-1-fix",
+        "checkpoint": "Checkpoint c3x ledger before merge",
+        "base": "Previous work",
+    }
+    parents = {
+        "head": ["checkpoint", "worker"],
+        "checkpoint": ["base"],
+        "base": [],
+    }
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "ensure_rewrite_safe", lambda root: None)
+    monkeypatch.setattr(cli, "is_ancestor", lambda root, ancestor, descendant: True)
+    monkeypatch.setattr(cli, "rev_parse", lambda root, rev: "head")
+    monkeypatch.setattr(cli, "commit_subject", lambda root, rev: subjects[rev])
+    monkeypatch.setattr(cli, "commit_parents", lambda root, rev: parents[rev])
+    monkeypatch.setattr(cli, "squash_head_to", lambda root, base, message: calls.append((base, message)))
+
+    result = runner.invoke(cli.app, ["squash", "bd-1"])
+
+    assert result.exit_code == 0
+    assert calls == [("base", "Complete c3x task bd-1\n\nFixed it")]
+    assert "Squashed bd-1: 2 commits" in result.stdout
+
+
+def test_squash_all_squashes_eligible_landed_tip_segment(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    calls: list[tuple[str, str]] = []
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="landed",
+    ).save(run_dir / "run.json")
+    subjects = {
+        "head": "Close c3x task bd-1",
+        "merge": "Merge c3x/bd-1-fix",
+        "base": "Previous work",
+    }
+    parents = {
+        "head": ["merge"],
+        "merge": ["base", "worker"],
+        "base": [],
+    }
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "ensure_rewrite_safe", lambda root: None)
+    monkeypatch.setattr(cli, "is_ancestor", lambda root, ancestor, descendant: True)
+    monkeypatch.setattr(cli, "rev_parse", lambda root, rev: "head")
+    monkeypatch.setattr(cli, "commit_subject", lambda root, rev: subjects[rev])
+    monkeypatch.setattr(cli, "commit_parents", lambda root, rev: parents[rev])
+    monkeypatch.setattr(cli, "squash_head_to", lambda root, base, message: calls.append((base, message)))
+
+    result = runner.invoke(cli.app, ["squash", "--all"])
+
+    assert result.exit_code == 0
+    assert calls == [("base", "Complete c3x task bd-1")]
+
+
 def test_cleanup_removes_superseded_attempt_run_directory(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     removed_worktrees: list[Path] = []

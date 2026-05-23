@@ -72,6 +72,38 @@ def branch_diff_summary(root: Path, branch: str) -> str:
     return "\n\n".join(parts) or "No diff or status output."
 
 
+def commit_subject(root: Path, rev: str) -> str:
+    result = _git(root, ["log", "-1", "--pretty=%s", rev], capture=True)
+    return result.stdout.strip()
+
+
+def commit_parents(root: Path, rev: str) -> list[str]:
+    result = _git(root, ["rev-list", "--parents", "-n", "1", rev], capture=True)
+    parts = result.stdout.strip().split()
+    return parts[1:]
+
+
+def rev_parse(root: Path, rev: str) -> str:
+    result = _git(root, ["rev-parse", rev], capture=True)
+    return result.stdout.strip()
+
+
+def ensure_rewrite_safe(root: Path) -> None:
+    result = _git(root, ["status", "--porcelain"], capture=True)
+    dirty = [
+        line
+        for line in result.stdout.splitlines()
+        if line[3:] and not line[3:].startswith(".flow/")
+    ]
+    if dirty:
+        raise GitError("git worktree has uncommitted changes:\n" + "\n".join(dirty))
+
+
+def squash_head_to(root: Path, base: str, message: str) -> None:
+    _git(root, ["reset", "--soft", base])
+    _git(root, ["commit", "-m", message])
+
+
 def remove_worktree(root: Path, worktree: Path, *, force: bool = False) -> None:
     if worktree.exists():
         args = ["worktree", "remove"]

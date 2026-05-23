@@ -72,6 +72,8 @@ c3x agents
 c3x start <task-id>
 c3x retry <task-id>
 c3x retry --all
+c3x squash <task-id>
+c3x squash --all
 c3x review <task-id>
 c3x land <task-id>
 c3x cleanup
@@ -102,6 +104,7 @@ Commands:
 | `c3x watch` | Run the autonomous c3x watch loop. |
 | `c3x start` | Start one worker in an isolated git worktree. |
 | `c3x retry` | Start a fresh worker attempt for blocked or stale work. |
+| `c3x squash` | Squash c3x-generated commits for landed work. |
 | `c3x agents` | List known local worker runs. |
 | `c3x metrics` | Summarize agent outcomes, retries, unfinished work, and blockers. |
 | `c3x verify` | Run configured project verification commands. |
@@ -187,14 +190,18 @@ c3x resume
 c3x start <task-id>
 c3x retry <task-id>
 c3x retry --all
+c3x squash <task-id>
+c3x squash --all
 c3x agents
 ```
 
 - `start TASK_ID`: start one worker in an isolated git worktree.
 - `retry [TASK_ID]`: archive the current run directory, clear blocked/review labels, and start a fresh attempt using the current agent config.
 - `retry --all`: reconcile stale runs, then retry all currently blocked flow tasks. Mutually exclusive with `TASK_ID`.
+- `squash [TASK_ID]`: squash the c3x-generated commits for one landed task when that task is the current branch tip.
+- `squash --all`: squash the eligible landed task segment at the current branch tip without naming the task. Mutually exclusive with `TASK_ID`.
 - `agents`: list known run records, statuses, PIDs, and branches.
-- Help: `c3x start --help`, `c3x retry --help`, `c3x agents --help`
+- Help: `c3x start --help`, `c3x retry --help`, `c3x squash --help`, `c3x agents --help`
 
 Retry creates attempt-specific branches/worktrees after the first attempt, for example:
 
@@ -208,6 +215,8 @@ Archived run evidence is preserved under names like:
 ```text
 .flow/runs/<task-id>-attempt-1/
 ```
+
+Squash rewrites local git history. It requires a clean root worktree, ignores `.flow/` generated state, and refuses non-tip task history instead of attempting a broad rebase. It combines c3x task commits such as worker commits, `Merge c3x/...`, `Close c3x task ...`, and `Checkpoint c3x ledger before merge` into one `Complete c3x task <task-id>` commit.
 
 ### Review, Landing, And Cleanup
 
