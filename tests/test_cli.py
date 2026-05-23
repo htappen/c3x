@@ -51,6 +51,7 @@ class _RecordingBeads:
         self.notes: list[tuple[str, str]] = []
         self.added_labels: list[tuple[str, list[str]]] = []
         self.removed_labels: list[tuple[str, list[str]]] = []
+        self.statuses: list[tuple[str, str]] = []
         self.closed: list[tuple[str, str]] = []
         self.next_id = 1
 
@@ -116,6 +117,11 @@ class _RecordingBeads:
             item,
             labels=tuple(label for label in item.labels if label not in labels),
         )
+
+    def set_status(self, task_id: str, status: str) -> None:
+        self.statuses.append((task_id, status))
+        item = self.items[task_id]
+        self.items[task_id] = replace(item, status=status)
 
     def close(self, task_id: str, note: str) -> None:
         self.closed.append((task_id, note))
@@ -304,3 +310,86 @@ def test_import_copies_worktree_result_to_run_directory(tmp_path: Path) -> None:
     assert WorkerResult.model_validate_json(canonical_result.read_text(encoding="utf-8")).summary == "Fixed it"
     assert saved.status == "completed"
     assert ("bd-1", ["flow", "reviewing", "completed-by-agent"]) in beads.added_labels
+
+
+def test_retry_archives_current_run_and_starts_fresh_attempt(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="fix",
+        status="blocked",
+        labels=("flow", "blocked", "blocker-result-missing"),
+    )
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="blocked",
+        attempt=1,
+    ).save(run_dir / "run.json")
+
+    def fake_start_worker(root: Path, config: object, task: BeadSummary) -> RunRecord:
+        record = RunRecord(
+            task_id=task.id,
+            branch="c3x/bd-1-fix-attempt-2",
+            worktree=str(root / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-2"),
+            prompt=str(root / ".flow" / "runs" / task.id / "prompt.md"),
+            result=str(root / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-2" / ".c3x" / "result.json"),
+            last_message=str(root / ".flow" / "runs" / task.id / "last-message.md"),
+            attempt=2,
+        )
+        record.save(root / ".flow" / "runs" / task.id / "run.json")
+        return record
+
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "load_config", lambda root: object())
+    monkeypatch.setattr(cli, "current_branch", lambda root: "feature")
+    monkeypatch.setattr(cli, "start_worker", fake_start_worker)
+
+    result = runner.invoke(cli.app, ["retry", "bd-1"])
+
+    assert result.exit_code == 0
+    assert (tmp_path / ".flow" / "runs" / "bd-1-attempt-1" / "run.json").exists()
+    assert RunRecord.load(run_dir / "run.json").attempt == 2
+    assert ("bd-1", "open") in beads.statuses
+    assert ("bd-1", "in_progress") in beads.statuses
+    assert ("bd-1", ["flow", "running", "attempt-2"]) in beads.added_labels
+    assert any("blocker-result-missing" in labels for item_id, labels in beads.removed_labels if item_id == "bd-1")
+
+
+def test_retry_all_retries_blocked_flow_tasks(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(id="bd-1", title="one", labels=("flow", "blocked"))
+    beads.items["bd-2"] = BeadSummary(id="bd-2", title="two", labels=("flow", "blocked"))
+    started: list[str] = []
+
+    def fake_start_worker(root: Path, config: object, task: BeadSummary) -> RunRecord:
+        started.append(task.id)
+        return RunRecord(
+            task_id=task.id,
+            branch=f"c3x/{task.id}",
+            worktree=str(root / ".flow" / "worktrees" / task.id),
+            prompt=str(root / ".flow" / "runs" / task.id / "prompt.md"),
+            result=str(root / ".flow" / "worktrees" / task.id / ".c3x" / "result.json"),
+            last_message=str(root / ".flow" / "runs" / task.id / "last-message.md"),
+        )
+
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "load_config", lambda root: object())
+    monkeypatch.setattr(cli, "current_branch", lambda root: "feature")
+    monkeypatch.setattr(cli, "start_worker", fake_start_worker)
+
+    result = runner.invoke(cli.app, ["retry", "--all"])
+
+    assert result.exit_code == 0
+    assert started == ["bd-1", "bd-2"]
+    assert ("bd-1", "in_progress") in beads.statuses
+    assert ("bd-2", "in_progress") in beads.statuses

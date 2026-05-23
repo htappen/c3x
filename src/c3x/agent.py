@@ -18,7 +18,7 @@ class AgentError(RuntimeError):
 
 def start_worker(root: Path, config: C3xConfig, task: BeadSummary) -> RunRecord:
     attempt = _next_attempt(root, task.id)
-    branch = task_branch(task.id, task.title)
+    branch = _attempt_branch(task.id, task.title, attempt)
     worktree = worktrees_dir(root) / branch.replace("/", "-")
     create_worktree(root, branch, worktree)
 
@@ -83,6 +83,13 @@ def _next_attempt(root: Path, task_id: str) -> int:
         if record.task_id == task_id:
             attempts = max(attempts, record.attempt)
     return attempts + 1
+
+
+def _attempt_branch(task_id: str, title: str, attempt: int) -> str:
+    branch = task_branch(task_id, title)
+    if attempt == 1:
+        return branch
+    return f"{branch}-attempt-{attempt}"
 
 
 def _worker_prompt(task: BeadSummary, result: Path) -> str:

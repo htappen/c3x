@@ -256,6 +256,30 @@ def start(
 
 
 @app.command()
+def retry(
+    task_id: Annotated[str | None, typer.Argument(help="Task id to retry.")] = None,
+    all_tasks: Annotated[
+        bool,
+        typer.Option("--all", help="Retry all currently blocked flow tasks."),
+    ] = False,
+) -> None:
+    """Start a fresh worker attempt for blocked or stale work."""
+    root = _root()
+    _warn_if_risky_flow_branch(root)
+    config = load_config(root)
+    beads = _beads(root)
+    try:
+        _import_finished_results(root, beads)
+        task_ids = _retry_task_ids(beads, task_id=task_id, all_tasks=all_tasks)
+        for item_id in task_ids:
+            record = _retry_task(root, config, beads, item_id)
+            console.print(f"[green]Retried[/green] {item_id} as attempt {record.attempt}")
+            console.print(f"Worktree: {record.worktree}")
+    except (AgentError, BeadsError, GitError, ValueError) as exc:
+        raise typer.Exit(_error(str(exc))) from exc
+
+
+@app.command()
 def agents() -> None:
     """List known local worker runs."""
     root = _root()
@@ -605,6 +629,82 @@ def _create_clarification_question(beads: Beads, item: BeadSummary) -> None:
     question_id = str(question.get("id", "new question"))
     beads.add_note(item.id, f"Needs human clarification: {question_id}")
     console.print(f"[yellow]Question[/yellow] {question_id} blocks {item.id}")
+
+
+def _retry_task_ids(beads: Beads, *, task_id: str | None, all_tasks: bool) -> list[str]:
+    if all_tasks and task_id:
+        raise ValueError("pass either a task id or --all, not both")
+    if not all_tasks and not task_id:
+        raise ValueError("pass a task id or --all")
+    if task_id:
+        return [task_id]
+    blocked = _with_labels(beads.list_active(), {"flow", "blocked"})
+    return [item.id for item in blocked]
+
+
+def _retry_task(root: Path, config: object, beads: Beads, task_id: str) -> RunRecord:
+    task = beads.show(task_id)
+    _ensure_retryable(root, task_id)
+    _archive_current_run(root, task_id)
+    beads.set_status(task_id, "open")
+    beads.add_labels(task_id, ["flow", "ready"])
+    beads.remove_labels(task_id, _retry_removed_labels(task))
+    record = start_worker(root, config, task)
+    beads.set_status(task_id, "in_progress")
+    beads.add_labels(task_id, ["flow", "running", f"attempt-{record.attempt}"])
+    beads.remove_labels(task_id, ["ready", "reviewing", "blocked"])
+    beads.add_note(task_id, f"c3x retry started attempt {record.attempt}")
+    return record
+
+
+def _ensure_retryable(root: Path, task_id: str) -> None:
+    path = run_record_path(root, task_id)
+    if not path.exists():
+        return
+    record = RunRecord.load(path)
+    if record.status == "landed":
+        raise ValueError(f"{task_id} is already landed")
+    if record.status == "running" and record.pid is not None and _process_is_running(record.pid):
+        raise ValueError(f"{task_id} still has a running worker pid {record.pid}")
+
+
+def _archive_current_run(root: Path, task_id: str) -> None:
+    run_dir = run_record_path(root, task_id).parent
+    if not run_dir.exists():
+        return
+    try:
+        record = RunRecord.load(run_dir / "run.json")
+        suffix = f"attempt-{record.attempt}"
+    except Exception:
+        suffix = "previous"
+    target = _unique_archive_path(run_dir.with_name(f"{task_id}-{suffix}"))
+    run_dir.rename(target)
+
+
+def _unique_archive_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    index = 2
+    while True:
+        candidate = path.with_name(f"{path.name}-{index}")
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+
+def _retry_removed_labels(task: BeadSummary) -> list[str]:
+    labels = {
+        "blocked",
+        "running",
+        "reviewing",
+        "reviewed",
+        "completed-by-agent",
+        "rejected",
+        "review-blocked",
+        "land-blocked",
+    }
+    labels.update(label for label in task.labels if label.startswith("blocker-"))
+    return sorted(labels)
 
 
 def _auto_review(root: Path, beads: Beads) -> None:
