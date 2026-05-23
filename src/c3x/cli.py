@@ -7,6 +7,7 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.live import Live
 from rich.table import Table
 
 from c3x.agent import AgentError, start_worker
@@ -118,30 +119,10 @@ def inbox() -> None:
 def status() -> None:
     """Show the current c3x project status."""
     root = _root()
-    config = load_config(root)
     try:
-        open_items = _beads(root).list_active()
-        ready_items = _beads(root).ready()
+        table = _build_status_table(root)
     except BeadsError as exc:
         raise typer.Exit(_error(str(exc))) from exc
-
-    inbox_items = _with_labels(open_items, {"flow", "inbox", "idea"})
-    question_items = _with_labels(open_items, {"flow", "question"})
-    running_items = _with_labels(open_items, {"flow", "running"})
-    reviewing_items = _with_labels(open_items, {"flow", "reviewing"})
-    blocked_items = _with_labels(open_items, {"flow", "blocked"})
-
-    table = Table(title="c3x status")
-    table.add_column("Bucket")
-    table.add_column("Count", justify="right")
-    table.add_row("Inbox", str(len(inbox_items)))
-    table.add_row("Questions", str(len(question_items)))
-    table.add_row("Active", str(len(open_items)))
-    table.add_row("Ready", str(len(ready_items)))
-    table.add_row("Running", str(len(running_items)))
-    table.add_row("Reviewing", str(len(reviewing_items)))
-    table.add_row("Blocked", str(len(blocked_items)))
-    table.add_row("Max parallel workers", str(config.limits.max_parallel_workers))
     console.print(table)
 
 
@@ -198,17 +179,21 @@ def run(
     interval: Annotated[int, typer.Option("--interval", min=1, help="Loop sleep seconds.")] = 5,
 ) -> None:
     """Run the c3x supervisor loop."""
-    while True:
-        if pause_path(_root()).exists():
-            console.print("[yellow]c3x is paused.[/yellow]")
+    root = _root()
+    with Live(_build_status_table(root), console=console, refresh_per_second=4) as live:
+        while True:
+            if pause_path(root).exists():
+                console.print("[yellow]c3x is paused.[/yellow]")
+                live.update(_build_status_table(root))
+                if once:
+                    return
+                time.sleep(interval)
+                continue
+            _supervisor_tick(root, dispatch=dispatch)
+            live.update(_build_status_table(root))
             if once:
                 return
             time.sleep(interval)
-            continue
-        _supervisor_tick(_root(), dispatch=dispatch)
-        if once:
-            return
-        time.sleep(interval)
 
 
 @app.command()
@@ -228,19 +213,23 @@ def watch(
     ] = True,
 ) -> None:
     """Run the autonomous c3x watch loop."""
-    while True:
-        if pause_path(_root()).exists():
-            console.print("[yellow]c3x is paused.[/yellow]")
+    root = _root()
+    with Live(_build_status_table(root), console=console, refresh_per_second=4) as live:
+        while True:
+            if pause_path(root).exists():
+                console.print("[yellow]c3x is paused.[/yellow]")
+                live.update(_build_status_table(root))
+                time.sleep(interval)
+                continue
+            _supervisor_tick(
+                root,
+                dispatch=True,
+                review=review,
+                land=land,
+                cleanup_done=cleanup_done,
+            )
+            live.update(_build_status_table(root))
             time.sleep(interval)
-            continue
-        _supervisor_tick(
-            _root(),
-            dispatch=True,
-            review=review,
-            land=land,
-            cleanup_done=cleanup_done,
-        )
-        time.sleep(interval)
 
 
 @app.command()
@@ -456,6 +445,31 @@ def _print_items(title: str, items: list[BeadSummary]) -> None:
     console.print(table)
 
 
+def _build_status_table(root: Path) -> Table:
+    config = load_config(root)
+    beads = _beads(root)
+    open_items = beads.list_active()
+    ready_items = beads.ready()
+    inbox_items = _with_labels(open_items, {"flow", "inbox", "idea"})
+    question_items = _with_labels(open_items, {"flow", "question"})
+    running_items = _with_labels(open_items, {"flow", "running"})
+    reviewing_items = _with_labels(open_items, {"flow", "reviewing"})
+    blocked_items = _with_labels(open_items, {"flow", "blocked"})
+
+    table = Table(title="c3x status")
+    table.add_column("Bucket")
+    table.add_column("Count", justify="right")
+    table.add_row("Inbox", str(len(inbox_items)))
+    table.add_row("Questions", str(len(question_items)))
+    table.add_row("Active", str(len(open_items)))
+    table.add_row("Ready", str(len(ready_items)))
+    table.add_row("Running", str(len(running_items)))
+    table.add_row("Reviewing", str(len(reviewing_items)))
+    table.add_row("Blocked", str(len(blocked_items)))
+    table.add_row("Max parallel workers", str(config.limits.max_parallel_workers))
+    return table
+
+
 def _supervisor_tick(
     root: Path,
     *,
@@ -482,7 +496,6 @@ def _supervisor_tick(
         _auto_review(root, beads)
     if land:
         _auto_land(root, beads, cleanup_done=cleanup_done)
-    status()
 
 
 def _plan_inbox(root: Path, beads: Beads) -> None:
