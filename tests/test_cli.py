@@ -238,3 +238,32 @@ def test_answer_marks_blocking_item_clarified(monkeypatch, tmp_path: Path) -> No
     assert ("bd-1", ["clarified"]) in beads.added_labels
     assert ("bd-2", ["question", "needs-human-clarification"]) in beads.removed_labels
     assert ("bd-2", "Answered human clarification") in beads.closed
+
+
+def test_import_blocks_exited_worker_missing_result(monkeypatch, tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", labels=("flow", "running"))
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    run_dir.mkdir(parents=True)
+    last_message = run_dir / "last-message.md"
+    last_message.write_text("Could not write result.json; path is read-only.", encoding="utf-8")
+    record = RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(last_message),
+        pid=12345,
+    )
+    record.save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "_process_is_running", lambda pid: False)
+
+    cli._import_finished_results(tmp_path, beads)
+
+    saved = RunRecord.load(run_dir / "run.json")
+    assert saved.status == "blocked"
+    assert saved.outcome == "missing-result"
+    assert ("bd-1", ["flow", "blocked", "blocker-result-missing"]) in beads.added_labels
+    assert ("bd-1", ["running", "reviewing"]) in beads.removed_labels
+    assert any("Could not write result.json" in note for _, note in beads.notes)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -683,6 +684,8 @@ def _import_finished_results(root: Path, beads: Beads) -> None:
             continue
         result_file = Path(record.result)
         if not result_file.exists():
+            if record.pid is not None and not _process_is_running(record.pid):
+                _block_missing_worker_result(root, beads, record)
             continue
         result = WorkerResult.model_validate_json(result_file.read_text(encoding="utf-8"))
         if result.task_id != record.task_id:
@@ -705,6 +708,57 @@ def _import_finished_results(root: Path, beads: Beads) -> None:
             record.outcome = result.status
         record.finished_at = _now()
         record.save(run_record_path(root, record.task_id))
+
+
+def _block_missing_worker_result(root: Path, beads: Beads, record: RunRecord) -> None:
+    evidence = _missing_result_evidence(record)
+    note = (
+        "Worker exited without writing result.json.\n"
+        "The supervisor marked this task blocked so it can be retried or fixed by a user.\n\n"
+        f"{evidence}"
+    )
+    beads.add_note(record.task_id, note)
+    beads.add_labels(record.task_id, ["flow", "blocked", "blocker-result-missing"])
+    beads.remove_labels(record.task_id, ["running", "reviewing"])
+    record.status = "blocked"
+    record.outcome = "missing-result"
+    record.finished_at = _now()
+    record.save(run_record_path(root, record.task_id))
+    console.print(f"[yellow]Blocked[/yellow] {record.task_id}: worker exited without result.json")
+
+
+def _missing_result_evidence(record: RunRecord) -> str:
+    lines = [
+        f"pid: {record.pid}",
+        f"attempt: {record.attempt}",
+        f"expected_result: {record.result}",
+    ]
+    last_message = _read_tail(Path(record.last_message), max_chars=4000)
+    if last_message:
+        lines.append(f"last_message:\n{last_message}")
+    stderr = _read_tail(Path(record.prompt).parent / "stderr.log", max_chars=4000)
+    if stderr:
+        lines.append(f"stderr_tail:\n{stderr}")
+    return "\n\n".join(lines)
+
+
+def _read_tail(path: Path, *, max_chars: int) -> str:
+    if not path.exists():
+        return ""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if len(text) <= max_chars:
+        return text.strip()
+    return text[-max_chars:].strip()
+
+
+def _process_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _load_worker_result(root: Path, task_id: str) -> WorkerResult:
