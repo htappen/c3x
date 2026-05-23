@@ -28,10 +28,22 @@ else
   echo "bd already installed: $(bd version 2>/dev/null || true)"
 fi
 
+BD_BIN="$(command -v bd || true)"
+if [ -z "$BD_BIN" ]; then
+  cat >&2 <<'EOF'
+`bd` installed, but it is still not on PATH.
+Add the directory containing `bd` to PATH, then rerun `scripts/setup.sh`.
+EOF
+  exit 1
+fi
+
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 
+ln -sfn "$BD_BIN" .venv/bin/bd
+
 echo "Installed c3x development environment."
 echo "Activate it with: . .venv/bin/activate"
+echo "bd shim installed at: .venv/bin/bd -> $BD_BIN"
