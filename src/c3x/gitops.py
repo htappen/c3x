@@ -38,6 +38,38 @@ def current_branch(root: Path) -> str:
 def merge_branch(root: Path, branch: str) -> None:
     commit_ledger_changes(root, "Checkpoint c3x ledger before merge")
     _git(root, ["merge", "--no-ff", branch, "-m", f"Merge {branch}"])
+    if not is_ancestor(root, branch, "HEAD"):
+        raise GitError(f"`{branch}` was not merged into HEAD")
+
+
+def commit_worktree_changes(worktree: Path, message: str) -> None:
+    paths = _changed_worktree_paths(worktree)
+    if not paths:
+        return
+    _git(worktree, ["add", *paths])
+    result = _git(worktree, ["diff", "--cached", "--quiet"], allow_exit_codes={0, 1})
+    if result.returncode == 0:
+        return
+    _git(worktree, ["commit", "-m", message])
+
+
+def is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
+    result = _git(root, ["merge-base", "--is-ancestor", ancestor, descendant], allow_exit_codes={0, 1})
+    return result.returncode == 0
+
+
+def branch_diff_summary(root: Path, branch: str) -> str:
+    commits = _git(root, ["log", "--oneline", f"HEAD..{branch}"], capture=True)
+    stat = _git(root, ["diff", "--stat", f"HEAD..{branch}"], capture=True)
+    status = _git(root, ["status", "--short"], capture=True)
+    parts = []
+    if commits.stdout.strip():
+        parts.append("Commits:\n" + commits.stdout.strip())
+    if stat.stdout.strip():
+        parts.append("Diff stat:\n" + stat.stdout.strip())
+    if status.stdout.strip():
+        parts.append("Root status:\n" + status.stdout.strip())
+    return "\n\n".join(parts) or "No diff or status output."
 
 
 def remove_worktree(root: Path, worktree: Path, *, force: bool = False) -> None:
@@ -72,6 +104,17 @@ def _ledger_paths(root: Path) -> list[str]:
         path = line[3:]
         if path.startswith(allowed) or path in exact:
             paths.append(path)
+    return paths
+
+
+def _changed_worktree_paths(worktree: Path) -> list[str]:
+    result = _git(worktree, ["status", "--porcelain"], capture=True)
+    paths: list[str] = []
+    for line in result.stdout.splitlines():
+        path = line[3:]
+        if not path or path.startswith(".c3x/"):
+            continue
+        paths.append(path)
     return paths
 
 

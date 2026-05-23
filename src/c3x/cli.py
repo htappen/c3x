@@ -18,9 +18,12 @@ from c3x.beads import Beads, BeadsError, BeadSummary
 from c3x.config import FLOW_DIR, load_config, write_default_config
 from c3x.gitops import (
     GitError,
+    branch_diff_summary,
     commit_ledger_changes,
+    commit_worktree_changes,
     current_branch,
     delete_branch,
+    is_ancestor,
     merge_branch,
     remove_worktree,
 )
@@ -46,6 +49,7 @@ class CleanupAction:
     branch: str
     reason: str
     remove_run_dir: bool = False
+    repair_merge: bool = False
 
 
 def _root() -> Path:
@@ -374,6 +378,10 @@ def review(
 @app.command()
 def land(
     task_id: Annotated[str, typer.Argument(help="Reviewed task id to merge.")],
+    cleanup_done: Annotated[
+        bool,
+        typer.Option("--cleanup/--no-cleanup", help="Remove the landed worktree and branch after merge."),
+    ] = True,
 ) -> None:
     """Merge a reviewed task branch and close the bead."""
     root = _root()
@@ -382,6 +390,7 @@ def land(
         record = RunRecord.load(run_record_path(root, task_id))
         if record.status != "reviewed":
             raise ValueError(f"{task_id} is not reviewed")
+        commit_worktree_changes(Path(record.worktree), f"Complete c3x task {task_id}")
         merge_branch(root, record.branch)
         beads = _beads(root)
         beads.close(task_id, "Landed by c3x")
@@ -391,9 +400,14 @@ def land(
         record.outcome = "landed"
         record.finished_at = _now()
         record.save(run_record_path(root, task_id))
+        if cleanup_done:
+            remove_worktree(root, Path(record.worktree), force=True)
+            delete_branch(root, record.branch)
     except (BeadsError, GitError, ValueError) as exc:
         raise typer.Exit(_error(str(exc))) from exc
     console.print(f"[green]Landed[/green] {task_id}")
+    if cleanup_done:
+        console.print(f"[green]Cleaned[/green] {task_id}")
 
 
 @app.command()
@@ -418,6 +432,9 @@ def cleanup(
         for action in actions:
             if dry_run:
                 console.print(f"[yellow]Would clean[/yellow] {action.reason}: {action.task_id}")
+                continue
+            if action.repair_merge and not _confirm_repair_merge(root, action):
+                console.print(f"[yellow]Skipped[/yellow] {action.task_id}")
                 continue
             _run_cleanup_action(root, action, force=force)
             console.print(f"[green]Cleaned[/green] {action.reason}: {action.task_id}")
@@ -745,13 +762,15 @@ def _cleanup_actions(root: Path, *, task_id: str | None) -> list[CleanupAction]:
         run_dir = path.parent
         if path == run_record_path(root, record.task_id):
             if record.status == "landed":
+                merged = is_ancestor(root, record.branch, "HEAD")
                 actions.append(
                     CleanupAction(
                         task_id=record.task_id,
                         run_dir=run_dir,
                         worktree=Path(record.worktree),
                         branch=record.branch,
-                        reason="landed worktree",
+                        reason="landed worktree" if merged else "landed but unmerged branch",
+                        repair_merge=not merged,
                     )
                 )
             continue
@@ -783,10 +802,19 @@ def _is_superseded_attempt(record: RunRecord, current: RunRecord | None) -> bool
 
 
 def _run_cleanup_action(root: Path, action: CleanupAction, *, force: bool) -> None:
-    remove_worktree(root, action.worktree, force=force)
+    if action.repair_merge:
+        commit_worktree_changes(action.worktree, f"Complete c3x task {action.task_id}")
+        merge_branch(root, action.branch)
+    remove_worktree(root, action.worktree, force=force or action.reason.startswith("landed"))
     delete_branch(root, action.branch, force=force)
     if action.remove_run_dir and action.run_dir.exists():
         shutil.rmtree(action.run_dir)
+
+
+def _confirm_repair_merge(root: Path, action: CleanupAction) -> bool:
+    console.print(f"[yellow]{action.task_id} is marked landed, but branch is not merged.[/yellow]")
+    console.print(branch_diff_summary(root, action.branch))
+    return typer.confirm(f"Merge {action.branch} before cleanup?", default=False)
 
 
 def _auto_review(root: Path, beads: Beads) -> None:
@@ -816,6 +844,7 @@ def _auto_land(root: Path, beads: Beads, *, cleanup_done: bool) -> None:
             record = RunRecord.load(run_record_path(root, item.id))
             if record.status != "reviewed":
                 continue
+            commit_worktree_changes(Path(record.worktree), f"Complete c3x task {item.id}")
             merge_branch(root, record.branch)
             beads.close(item.id, "Landed by c3x watch")
             beads.add_labels(item.id, ["landed"])
@@ -826,7 +855,7 @@ def _auto_land(root: Path, beads: Beads, *, cleanup_done: bool) -> None:
             record.save(run_record_path(root, item.id))
             console.print(f"[green]Landed[/green] {item.id}")
             if cleanup_done:
-                remove_worktree(root, Path(record.worktree))
+                remove_worktree(root, Path(record.worktree), force=True)
                 delete_branch(root, record.branch)
                 console.print(f"[green]Cleaned[/green] {item.id}")
         except (BeadsError, GitError, ValueError) as exc:

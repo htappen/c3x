@@ -43,3 +43,14 @@ def test_worker_prompt_includes_caveman_mode(tmp_path: Path) -> None:
 
     assert "CAVEMAN MODE ACTIVE" in prompt
     assert "Task: bd-1" in prompt
+
+
+def test_worker_prompt_forbids_beads_and_git_landing(tmp_path: Path) -> None:
+    prompt = _worker_prompt(
+        BeadSummary(id="bd-1", title="Fix auth"),
+        tmp_path / "result.json",
+    )
+
+    assert "Do not run Beads commands" in prompt
+    assert "Do not run `git commit`, `git push`, `git pull`, `git merge`" in prompt
+    assert "The supervisor will commit and merge" in prompt

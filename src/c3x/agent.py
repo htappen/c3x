@@ -102,6 +102,15 @@ Title: {task.title}
 
 Work on exactly this task in the current git worktree.
 
+Supervisor owns task state, commits, merges, cleanup, and all Beads writes.
+
+Do not run Beads commands, including `bd prime`, `bd ready`, `bd update`, `bd close`,
+`bd create`, `bd dolt pull`, or `bd dolt push`.
+
+Do not run `git commit`, `git push`, `git pull`, `git merge`, or branch cleanup.
+Leave changed files in the worktree. The supervisor will commit and merge them after
+review.
+
 Write a structured JSON result to:
 {result}
 

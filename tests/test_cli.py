@@ -155,15 +155,30 @@ def test_start_warns_when_root_branch_is_main(monkeypatch, tmp_path: Path) -> No
 
 def test_land_warns_when_root_branch_is_head(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
+    committed_worktrees: list[Path] = []
+    removed_worktrees: list[tuple[Path, bool]] = []
+    deleted_branches: list[str] = []
     monkeypatch.setattr(cli, "_root", lambda: tmp_path)
     monkeypatch.setattr(cli, "current_branch", lambda root: "HEAD")
     monkeypatch.setattr(cli, "_beads", lambda root: _FakeBeads())
+    monkeypatch.setattr(
+        cli,
+        "commit_worktree_changes",
+        lambda worktree, message: committed_worktrees.append(worktree),
+    )
     monkeypatch.setattr(cli, "merge_branch", lambda root, branch: None)
     monkeypatch.setattr(cli, "commit_ledger_changes", lambda root, message: None)
+    monkeypatch.setattr(
+        cli,
+        "remove_worktree",
+        lambda root, path, force=False: removed_worktrees.append((path, force)),
+    )
+    monkeypatch.setattr(cli, "delete_branch", lambda root, branch, force=False: deleted_branches.append(branch))
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-auth"
     record = RunRecord(
         task_id="bd-1",
         branch="c3x/bd-1-fix-auth",
-        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-auth"),
+        worktree=str(worktree),
         prompt=str(tmp_path / ".flow" / "runs" / "bd-1" / "prompt.md"),
         result=str(tmp_path / ".flow" / "runs" / "bd-1" / "result.json"),
         last_message=str(tmp_path / ".flow" / "runs" / "bd-1" / "last.md"),
@@ -175,6 +190,9 @@ def test_land_warns_when_root_branch_is_head(monkeypatch, tmp_path: Path) -> Non
 
     assert result.exit_code == 0
     assert "root worktree is on `HEAD`" in result.stdout
+    assert committed_worktrees == [worktree]
+    assert removed_worktrees == [(worktree, True)]
+    assert deleted_branches == ["c3x/bd-1-fix-auth"]
 
 
 def test_add_no_validate_leaves_feedback_unplanned(monkeypatch, tmp_path: Path) -> None:
@@ -424,6 +442,7 @@ def test_cleanup_removes_superseded_attempt_run_directory(monkeypatch, tmp_path:
         attempt=2,
     ).save(current_dir / "run.json")
     monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "is_ancestor", lambda root, ancestor, descendant: True)
     monkeypatch.setattr(cli, "remove_worktree", lambda root, worktree, force=False: removed_worktrees.append(worktree))
     monkeypatch.setattr(cli, "delete_branch", lambda root, branch, force=False: deleted_branches.append(branch))
 
@@ -460,6 +479,7 @@ def test_cleanup_dry_run_leaves_superseded_attempt(monkeypatch, tmp_path: Path) 
         attempt=2,
     ).save(current_dir / "run.json")
     monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "is_ancestor", lambda root, ancestor, descendant: True)
 
     result = runner.invoke(cli.app, ["cleanup", "--dry-run"])
 
@@ -485,6 +505,7 @@ def test_cleanup_removes_landed_worktree_without_deleting_current_run(monkeypatc
         attempt=1,
     ).save(run_dir / "run.json")
     monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "is_ancestor", lambda root, ancestor, descendant: True)
     monkeypatch.setattr(cli, "remove_worktree", lambda root, path, force=False: removed_worktrees.append(path))
     monkeypatch.setattr(cli, "delete_branch", lambda root, branch, force=False: deleted_branches.append(branch))
 
@@ -494,3 +515,105 @@ def test_cleanup_removes_landed_worktree_without_deleting_current_run(monkeypatc
     assert (run_dir / "run.json").exists()
     assert removed_worktrees == [worktree]
     assert deleted_branches == ["c3x/bd-1-fix"]
+
+
+def test_cleanup_repairs_landed_unmerged_branch_after_confirmation(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    calls: list[tuple[str, object]] = []
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="landed",
+        attempt=1,
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "is_ancestor", lambda root, ancestor, descendant: False)
+    monkeypatch.setattr(cli, "branch_diff_summary", lambda root, branch: "Diff stat:\n file.ts | 2 +")
+    monkeypatch.setattr(cli, "commit_worktree_changes", lambda path, message: calls.append(("commit_worktree", path)))
+    monkeypatch.setattr(cli, "merge_branch", lambda root, branch: calls.append(("merge", branch)))
+    monkeypatch.setattr(
+        cli,
+        "remove_worktree",
+        lambda root, path, force=False: calls.append(("remove_worktree", (path, force))),
+    )
+    monkeypatch.setattr(cli, "delete_branch", lambda root, branch, force=False: calls.append(("delete_branch", branch)))
+
+    result = runner.invoke(cli.app, ["cleanup", "bd-1"], input="y\n")
+
+    assert result.exit_code == 0
+    assert "Diff stat" in result.stdout
+    assert ("commit_worktree", worktree) in calls
+    assert ("merge", "c3x/bd-1-fix") in calls
+    assert ("remove_worktree", (worktree, True)) in calls
+    assert ("delete_branch", "c3x/bd-1-fix") in calls
+
+
+def test_cleanup_skips_landed_unmerged_branch_when_declined(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    calls: list[tuple[str, object]] = []
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="landed",
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "is_ancestor", lambda root, ancestor, descendant: False)
+    monkeypatch.setattr(cli, "branch_diff_summary", lambda root, branch: "Diff stat:\n file.ts | 2 +")
+    monkeypatch.setattr(cli, "merge_branch", lambda root, branch: calls.append(("merge", branch)))
+
+    result = runner.invoke(cli.app, ["cleanup", "bd-1"], input="n\n")
+
+    assert result.exit_code == 0
+    assert "Skipped" in result.stdout
+    assert calls == []
+
+
+def test_auto_land_commits_merges_and_force_cleans_worker_worktree(monkeypatch, tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="fix",
+        labels=("flow", "reviewing", "reviewed"),
+    )
+    calls: list[tuple[str, object]] = []
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="reviewed",
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "commit_worktree_changes", lambda path, message: calls.append(("commit_worktree", path)))
+    monkeypatch.setattr(cli, "merge_branch", lambda root, branch: calls.append(("merge", branch)))
+    monkeypatch.setattr(cli, "commit_ledger_changes", lambda root, message: calls.append(("commit_ledger", message)))
+    monkeypatch.setattr(beads, "close", lambda task_id, note: calls.append(("close", task_id)))
+    monkeypatch.setattr(
+        cli,
+        "remove_worktree",
+        lambda root, path, force=False: calls.append(("remove_worktree", (path, force))),
+    )
+    monkeypatch.setattr(cli, "delete_branch", lambda root, branch, force=False: calls.append(("delete_branch", branch)))
+
+    cli._auto_land(tmp_path, beads, cleanup_done=True)
+
+    saved = RunRecord.load(run_dir / "run.json")
+    assert saved.status == "landed"
+    assert ("commit_worktree", worktree) in calls
+    assert ("merge", "c3x/bd-1-fix") in calls
+    assert ("remove_worktree", (worktree, True)) in calls
+    assert ("delete_branch", "c3x/bd-1-fix") in calls

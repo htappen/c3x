@@ -167,6 +167,7 @@ Archived run evidence is preserved under names like:
 ```bash
 c3x review <task-id>
 c3x land <task-id>
+c3x land --no-cleanup <task-id>
 c3x cleanup
 c3x cleanup <task-id>
 c3x cleanup --dry-run
@@ -174,8 +175,10 @@ c3x cleanup --force
 ```
 
 - `review`: validate a completed worker result and mark it reviewed.
-- `land`: merge a reviewed branch into the current root branch and close the Beads task.
+- `land`: merge a reviewed branch into the current root branch, close the Beads task, and remove the landed worktree/branch.
+- `land --no-cleanup`: land the task but leave the worktree/branch for inspection.
 - `cleanup`: remove landed task worktrees/branches and archived attempts superseded by later completed, reviewed, or landed attempts.
+- `cleanup`: also detects tasks marked landed whose branch is not merged, shows commit/diff/status context, and asks before repairing with a merge.
 - `cleanup <task-id>`: cleanup candidates only for one task.
 - `cleanup --dry-run`: show cleanup candidates without deleting anything.
 - `cleanup --force`: force-remove dirty stale worktrees and unmerged stale branches.
