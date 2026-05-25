@@ -1073,7 +1073,21 @@ def _cleanup_actions(root: Path, *, task_id: str | None) -> list[CleanupAction]:
         run_dir = path.parent
         if path == run_record_path(root, record.task_id):
             if record.status == "landed":
-                merged = is_ancestor(root, record.branch, "HEAD")
+                try:
+                    merged = is_ancestor(root, record.branch, "HEAD")
+                except GitError as exc:
+                    if not _is_missing_ref_error(exc):
+                        raise
+                    actions.append(
+                        CleanupAction(
+                            task_id=record.task_id,
+                            run_dir=run_dir,
+                            worktree=Path(record.worktree),
+                            branch=record.branch,
+                            reason="landed worktree with missing branch",
+                        )
+                    )
+                    continue
                 actions.append(
                     CleanupAction(
                         task_id=record.task_id,
@@ -1110,6 +1124,16 @@ def _is_superseded_attempt(record: RunRecord, current: RunRecord | None) -> bool
     if current.attempt <= record.attempt:
         return False
     return current.status in {"completed", "reviewed", "landed"}
+
+
+def _is_missing_ref_error(exc: GitError) -> bool:
+    message = str(exc).lower()
+    return (
+        "not a valid object name" in message
+        or "unknown revision" in message
+        or "ambiguous argument" in message
+        or "not a valid ref" in message
+    )
 
 
 def _run_cleanup_action(root: Path, action: CleanupAction, *, force: bool) -> None:

@@ -166,7 +166,12 @@ def remove_worktree(root: Path, worktree: Path, *, force: bool = False) -> None:
 
 
 def delete_branch(root: Path, branch: str, *, force: bool = False) -> None:
-    _git(root, ["branch", "-D" if force else "-d", branch])
+    try:
+        _git(root, ["branch", "-D" if force else "-d", branch])
+    except GitError as exc:
+        if "not found" in str(exc).lower():
+            return
+        raise
 
 
 def commit_ledger_changes(root: Path, message: str) -> None:
