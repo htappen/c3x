@@ -68,10 +68,13 @@ Manual commands remain available when you want to step through the pipeline:
 ```bash
 c3x run --once
 c3x status
+c3x status --watch
 c3x agents
 c3x start <task-id>
 c3x retry <task-id>
 c3x retry --all
+c3x unstick
+c3x kill --dry-run
 c3x squash <task-id>
 c3x squash --all
 c3x review <task-id>
@@ -107,11 +110,13 @@ Commands:
 | `c3x resolve-conflict` | Start a conflict resolver worker for merge-conflict-blocked work. |
 | `c3x squash` | Squash c3x-generated commits for landed work. |
 | `c3x agents` | List known local worker runs. |
+| `c3x kill` | Kill recorded c3x worker processes for this project. |
 | `c3x metrics` | Summarize agent outcomes, retries, unfinished work, and blockers. |
 | `c3x verify` | Run configured project verification commands. |
 | `c3x review` | Review a completed worker result and mark it ready to land. |
 | `c3x land` | Merge a reviewed task branch and close the bead. |
 | `c3x cleanup` | Remove landed task worktrees and superseded stale attempts. |
+| `c3x unstick` | Detect and repair stale c3x worker/Beads state. |
 | `c3x pause` | Pause supervisor dispatch/import loops. |
 | `c3x resume` | Resume supervisor dispatch/import loops. |
 | `c3x critic` | Create improvement tasks from repeated blocked work. |
@@ -163,6 +168,8 @@ c3x run --once
 c3x run --dispatch
 c3x run --interval 10
 c3x status
+c3x status --watch
+c3x status --watch --interval 5
 c3x watch
 c3x watch --no-review
 c3x watch --no-land
@@ -177,13 +184,16 @@ c3x resume
 - `run --once`: perform one supervisor tick and exit. Default: loop until interrupted.
 - `run --dispatch`: also start ready tasks up to the configured parallel worker limit. Default: no dispatch.
 - `run --interval N`: set loop sleep seconds. Default: `5`.
-- `status`: show current inbox, ready, running, reviewing, blocked, and done counts.
-- `watch`: autonomous loop; dispatches, reviews, lands, and cleans landed work by default.
+- `status`: show supervisor activity, bucket counts, and active worker run records.
+- `status --watch`: refresh status in place without filling the terminal. Default refresh interval: `2`.
+- `watch`: autonomous loop; dispatches, reviews, lands, cleans landed work, and recovers interrupted workers by default.
+- Recovery behavior: finished workers are imported, dead unfinished attempts are archived and restarted, and live workers are left alone.
 - `watch --interval N`: set loop sleep seconds. Default: `5`.
 - `watch --review/--no-review`: automatically review completed worker results. Default: `--review`.
 - `watch --land/--no-land`: automatically land reviewed work into the current root branch. Default: `--land`.
 - `watch --cleanup/--no-cleanup`: automatically remove landed worktrees and branches. Default: `--cleanup`.
 - `watch --resolve-conflicts/--no-resolve-conflicts`: automatically start resolver workers for merge-conflict land blockers. Default: `--resolve-conflicts`.
+- Stuck detection: `watch` emits a cooldown-protected warning when it sees high-confidence stale active state, then points you at `c3x unstick`.
 - `pause` / `resume`: create or remove the `.flow/paused` marker used by supervisor loops.
 - Help: `c3x run --help`, `c3x watch --help`
 
@@ -193,6 +203,13 @@ c3x resume
 c3x start <task-id>
 c3x retry <task-id>
 c3x retry --all
+c3x unstick
+c3x unstick --fix
+c3x unstick --fix --accept-verification-gaps
+c3x kill --dry-run
+c3x kill
+c3x kill --force
+c3x kill --all
 c3x resolve-conflict <task-id>
 c3x resolve-conflict --all
 c3x squash <task-id>
@@ -203,6 +220,13 @@ c3x agents
 - `start TASK_ID`: start one worker in an isolated git worktree.
 - `retry [TASK_ID]`: archive the current run directory, clear blocked/review labels, and start a fresh attempt using the current agent config.
 - `retry --all`: reconcile stale runs, then retry all currently blocked flow tasks. Mutually exclusive with `TASK_ID`.
+- `unstick`: dry-run stale-state repair with cheap verification. It compares Beads state, `.flow/runs/<task-id>/run.json`, worker `result.json`, branch containment, conflict markers, and cheap recorded verification commands.
+- `unstick --fix`: apply eligible repairs, such as closing a Beads task whose completed branch is already contained in `HEAD`.
+- `unstick --accept-verification-gaps`: allow repair despite recorded or rerun cheap verification gaps. Use this only after reading the reported evidence.
+- `kill --dry-run`: show live recorded c3x worker PIDs without signaling them.
+- `kill`: send `SIGTERM` to recorded live running workers for this project.
+- `kill --force`: send `SIGKILL`.
+- `kill --all`: also inspect non-running run records for live recorded PIDs.
 - `resolve-conflict [TASK_ID]`: archive the blocked run and start a resolver worker for a merge-conflict land blocker.
 - `resolve-conflict --all`: resolve all currently merge-conflict-blocked flow tasks. Mutually exclusive with `TASK_ID`.
 - `squash [TASK_ID]`: squash the c3x-generated commits for one landed task when that task is the current branch tip.
@@ -248,6 +272,47 @@ c3x cleanup --force
 - Help: `c3x review --help`, `c3x land --help`, `c3x cleanup --help`
 
 Cleanup intentionally does not remove active `completed` or `reviewing` worktrees, because those still hold code that may need review or landing.
+
+## CLI, Beads, And Logs
+
+Small architecture model:
+
+- Beads is the durable task ledger: titles, labels, dependencies, status, notes, and closure.
+- `.flow/runs/<task-id>/` is the local execution ledger: prompt, stdout/stderr logs, last worker message, canonical result, PID, branch, worktree, attempt, and outcome.
+- Git branches/worktrees hold the actual code changes.
+- `c3x` is the supervisor that keeps those three views consistent.
+
+Use `c3x` first for normal operation:
+
+```bash
+c3x status --watch
+c3x agents
+c3x unstick
+c3x retry <task-id>
+c3x cleanup --dry-run
+c3x kill --dry-run
+```
+
+Use `bd` directly when you need ledger-level investigation or manual task editing:
+
+```bash
+bd show <task-id>
+bd list --status open,in_progress,blocked --json
+bd update <task-id> --remove-label running --remove-label reviewing
+bd close <task-id> -r "manual cleanup reason"
+```
+
+Use `.flow` logs when you need execution evidence:
+
+```bash
+sed -n '1,220p' .flow/runs/<task-id>/result.json
+tail -120 .flow/runs/<task-id>/last-message.md
+tail -120 .flow/runs/<task-id>/stdout.log
+tail -120 .flow/runs/<task-id>/stderr.log
+git branch --contains <recorded-branch>
+```
+
+Rule of thumb: if the question is "what should the supervisor do next?", use `c3x`. If the question is "what does the task ledger currently say?", use `bd`. If the question is "did the worker actually do and verify the work?", inspect `.flow/runs/` and the branch/worktree.
 
 ### Verification And Metrics
 
