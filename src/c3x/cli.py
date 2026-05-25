@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import time
@@ -9,7 +10,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-from rich.console import Console
+from rich.console import Console, Group
 from rich.live import Live
 from rich.table import Table
 
@@ -34,7 +35,7 @@ from c3x.gitops import (
     squash_head_to,
 )
 from c3x.metrics import collect_metrics
-from c3x.paths import pause_path, result_path, run_record_path
+from c3x.paths import activity_path, pause_path, result_path, run_record_path
 from c3x.schema import RunRecord, WorkerResult
 from c3x.verify import run_verification
 
@@ -147,14 +148,26 @@ def inbox() -> None:
 
 
 @app.command()
-def status() -> None:
+def status(
+    watch: Annotated[bool, typer.Option("--watch", help="Refresh status in place.")] = False,
+    interval: Annotated[int, typer.Option("--interval", min=1, help="Watch refresh seconds.")] = 2,
+) -> None:
     """Show the current c3x project status."""
     root = _root()
     try:
-        table = _build_status_table(root)
+        view = _build_status_view(root)
     except BeadsError as exc:
         raise typer.Exit(_error(str(exc))) from exc
-    console.print(table)
+    if not watch:
+        console.print(view)
+        return
+    with Live(view, console=console, refresh_per_second=4) as live:
+        while True:
+            time.sleep(interval)
+            try:
+                live.update(_build_status_view(root))
+            except BeadsError as exc:
+                raise typer.Exit(_error(str(exc))) from exc
 
 
 @app.command()
@@ -211,17 +224,20 @@ def run(
 ) -> None:
     """Run the c3x supervisor loop."""
     root = _root()
-    with Live(_build_status_table(root), console=console, refresh_per_second=4) as live:
+    _write_activity(root, "starting supervisor loop")
+    with Live(_build_status_view(root), console=console, refresh_per_second=4) as live:
         while True:
             if pause_path(root).exists():
+                _write_activity(root, "paused")
                 console.print("[yellow]c3x is paused.[/yellow]")
-                live.update(_build_status_table(root))
+                live.update(_build_status_view(root))
                 if once:
                     return
                 time.sleep(interval)
                 continue
             _supervisor_tick(root, dispatch=dispatch)
-            live.update(_build_status_table(root))
+            _write_activity(root, f"waiting {interval}s before next tick")
+            live.update(_build_status_view(root))
             if once:
                 return
             time.sleep(interval)
@@ -252,11 +268,13 @@ def watch(
 ) -> None:
     """Run the autonomous c3x watch loop."""
     root = _root()
-    with Live(_build_status_table(root), console=console, refresh_per_second=4) as live:
+    _write_activity(root, "starting autonomous watch loop")
+    with Live(_build_status_view(root), console=console, refresh_per_second=4) as live:
         while True:
             if pause_path(root).exists():
+                _write_activity(root, "paused")
                 console.print("[yellow]c3x is paused.[/yellow]")
-                live.update(_build_status_table(root))
+                live.update(_build_status_view(root))
                 time.sleep(interval)
                 continue
             _supervisor_tick(
@@ -267,7 +285,8 @@ def watch(
                 cleanup_done=cleanup_done,
                 resolve_conflicts=resolve_conflicts,
             )
-            live.update(_build_status_table(root))
+            _write_activity(root, f"waiting {interval}s before next tick")
+            live.update(_build_status_view(root))
             time.sleep(interval)
 
 
@@ -584,6 +603,48 @@ def _print_items(title: str, items: list[BeadSummary]) -> None:
     console.print(table)
 
 
+def _build_status_view(root: Path) -> Group:
+    return Group(_build_activity_table(root), _build_status_table(root), _build_workers_table(root))
+
+
+def _build_activity_table(root: Path) -> Table:
+    activity = _read_activity(root)
+    supervisor = activity.get("supervisor") or "idle; no supervisor activity recorded"
+    updated_at = activity.get("updated_at") or ""
+    age = _age_label(updated_at) if updated_at else ""
+
+    table = Table(title="c3x activity")
+    table.add_column("Actor")
+    table.add_column("Activity")
+    table.add_column("Updated")
+    table.add_row("Supervisor", supervisor, age)
+    return table
+
+
+def _build_workers_table(root: Path) -> Table:
+    table = Table(title="c3x workers")
+    table.add_column("Task")
+    table.add_column("Status")
+    table.add_column("PID", justify="right")
+    table.add_column("Age")
+    table.add_column("Latest")
+    records = _run_records(root)
+    active = [record for record in records if record.status in {"running", "completed", "reviewed"}]
+    if not active:
+        table.add_row("-", "idle", "", "", "")
+        return table
+    for record in active:
+        latest = _one_line(_read_tail(Path(record.last_message), max_chars=180))
+        table.add_row(
+            record.task_id,
+            record.status,
+            "" if record.pid is None else str(record.pid),
+            _age_label(record.started_at),
+            latest,
+        )
+    return table
+
+
 def _build_status_table(root: Path) -> Table:
     config = load_config(root)
     beads = _beads(root)
@@ -609,6 +670,47 @@ def _build_status_table(root: Path) -> Table:
     return table
 
 
+def _write_activity(root: Path, supervisor: str) -> None:
+    path = activity_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"supervisor": supervisor, "updated_at": _now()}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _read_activity(root: Path) -> dict[str, str]:
+    path = activity_path(root)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"supervisor": "activity state is unreadable", "updated_at": ""}
+    return {key: value for key, value in data.items() if isinstance(key, str) and isinstance(value, str)}
+
+
+def _age_label(timestamp: str) -> str:
+    try:
+        then = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return ""
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    seconds = max(int((datetime.now(timezone.utc) - then).total_seconds()), 0)
+    if seconds < 60:
+        return f"{seconds}s ago"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = minutes // 60
+    return f"{hours}h ago"
+
+
+def _one_line(text: str) -> str:
+    return " ".join(text.split())
+
+
 def _supervisor_tick(
     root: Path,
     *,
@@ -619,28 +721,38 @@ def _supervisor_tick(
     resolve_conflicts: bool = False,
 ) -> None:
     beads = _beads(root)
+    _write_activity(root, "importing finished worker results")
     _import_finished_results(root, beads)
+    _write_activity(root, "planning inbox items")
     _plan_inbox(root, beads)
+    _write_activity(root, "checking critic tasks")
     _critic_tick(beads)
     if dispatch:
+        _write_activity(root, "checking worker capacity")
         config = load_config(root)
         running = len(_with_labels(beads.list_active(), {"flow", "running"}))
         slots = max(config.limits.max_parallel_workers - running, 0)
         for task in beads.ready()[:slots]:
             if "flow" in task.labels:
+                _write_activity(root, f"dispatching worker {task.id}")
                 start_worker(root, config, task)
                 beads.set_status(task.id, "in_progress")
                 beads.add_labels(task.id, ["flow", "running"])
                 beads.remove_labels(task.id, ["ready", "blocked", "reviewing"])
     if review:
+        _write_activity(root, "reviewing completed work")
         _auto_review(root, beads)
     if land:
+        _write_activity(root, "landing reviewed work")
         _auto_land(root, beads, cleanup_done=cleanup_done)
     if resolve_conflicts:
+        _write_activity(root, "checking merge-conflict blockers")
         config = load_config(root)
         for item_id in _conflict_task_ids(beads, task_id=None, all_tasks=True):
+            _write_activity(root, f"starting conflict resolver {item_id}")
             _resolve_conflict_task(root, config, beads, item_id)
             console.print(f"[green]Conflict resolver started[/green] {item_id}")
+    _write_activity(root, "tick complete")
 
 
 def _plan_inbox(root: Path, beads: Beads) -> None:

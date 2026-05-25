@@ -237,10 +237,46 @@ def test_status_renders_bucket_counts(monkeypatch, tmp_path: Path) -> None:
     result = runner.invoke(cli.app, ["status"])
 
     assert result.exit_code == 0
+    assert "c3x activity" in result.stdout
+    assert "Supervisor" in result.stdout
     assert "Inbox" in result.stdout
     assert "Questions" in result.stdout
     assert "Max parallel workers" in result.stdout
     assert "3" in result.stdout
+
+
+def test_status_renders_supervisor_activity_and_worker_latest_message(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _StatusBeads()
+    run_dir = tmp_path / ".flow" / "runs" / "bd-3"
+    last_message = run_dir / "last-message.md"
+    last_message.parent.mkdir(parents=True)
+    last_message.write_text("Editing src/c3x/cli.py\nRunning pytest next", encoding="utf-8")
+    RunRecord(
+        task_id="bd-3",
+        branch="c3x/bd-3-running",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-3-running"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(last_message),
+        pid=1234,
+    ).save(run_dir / "run.json")
+    cli._write_activity(tmp_path, "dispatching worker bd-3")
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda root: type("Config", (), {"limits": type("Limits", (), {"max_parallel_workers": 3})()})(),
+    )
+
+    result = runner.invoke(cli.app, ["status"])
+
+    assert result.exit_code == 0
+    assert "dispatching worker bd-3" in result.stdout
+    assert "bd-3" in result.stdout
+    assert "1234" in result.stdout
+    assert "Editing src/c3x/cli.py Running pytest next" in result.stdout
 
 
 def test_answer_marks_blocking_item_clarified(monkeypatch, tmp_path: Path) -> None:

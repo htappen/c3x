@@ -43,3 +43,7 @@ def last_message_path(root: Path, task_id: str) -> Path:
 
 def pause_path(root: Path) -> Path:
     return flow_dir(root) / "paused"
+
+
+def activity_path(root: Path) -> Path:
+    return flow_dir(root) / "activity.json"
