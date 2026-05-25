@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -35,7 +36,7 @@ from c3x.gitops import (
     squash_head_to,
 )
 from c3x.metrics import collect_metrics
-from c3x.paths import activity_path, pause_path, result_path, run_record_path
+from c3x.paths import activity_path, pause_path, result_path, run_record_path, stuck_notice_path
 from c3x.schema import RunRecord, WorkerResult
 from c3x.verify import run_verification
 
@@ -65,6 +66,17 @@ class SquashPlan:
     base: str
     commits: tuple[str, ...]
     message: str
+
+
+@dataclass(frozen=True)
+class UnstickCandidate:
+    task_id: str
+    action: str
+    reason: str
+    record_status: str
+    bead_status: str | None
+    verification_issues: tuple[str, ...] = ()
+    cheap_commands: tuple[str, ...] = ()
 
 
 def _root() -> Path:
@@ -535,6 +547,43 @@ def cleanup(
 
 
 @app.command()
+def unstick(
+    task_id: Annotated[str | None, typer.Argument(help="Optional task id to inspect or repair.")] = None,
+    fix: Annotated[bool, typer.Option("--fix", help="Apply high-confidence repairs.")] = False,
+    verify_mode: Annotated[
+        str,
+        typer.Option("--verify", help="Verification mode: cheap or none."),
+    ] = "cheap",
+    accept_verification_gaps: Annotated[
+        bool,
+        typer.Option("--accept-verification-gaps", help="Repair even when cheap verification reports gaps."),
+    ] = False,
+) -> None:
+    """Detect and repair stale c3x worker/Beads state."""
+    root = _root()
+    if verify_mode not in {"cheap", "none"}:
+        raise typer.Exit(_error("--verify must be cheap or none"))
+    try:
+        beads = _beads(root)
+        candidates = _unstick_candidates(root, beads, task_id=task_id, verify_mode=verify_mode)
+        if not candidates:
+            console.print("[green]No stuck c3x state detected.[/green]")
+            return
+        _print_unstick_candidates(candidates, fix=fix)
+        if not fix:
+            console.print("[yellow]Dry run only.[/yellow] Re-run with --fix to apply eligible repairs.")
+            return
+        for candidate in candidates:
+            if candidate.verification_issues and not accept_verification_gaps:
+                console.print(f"[yellow]Skipped[/yellow] {candidate.task_id}: cheap verification has gaps")
+                continue
+            _apply_unstick_candidate(root, beads, candidate)
+            console.print(f"[green]Repaired[/green] {candidate.task_id}: {candidate.action}")
+    except (BeadsError, GitError, ValueError) as exc:
+        raise typer.Exit(_error(str(exc))) from exc
+
+
+@app.command()
 def pause() -> None:
     """Pause supervisor dispatch/import loops."""
     path = pause_path(_root())
@@ -752,6 +801,7 @@ def _supervisor_tick(
             _write_activity(root, f"starting conflict resolver {item_id}")
             _resolve_conflict_task(root, config, beads, item_id)
             console.print(f"[green]Conflict resolver started[/green] {item_id}")
+    _maybe_warn_stuck(root, beads)
     _write_activity(root, "tick complete")
 
 
@@ -1134,6 +1184,310 @@ def _is_missing_ref_error(exc: GitError) -> bool:
         or "ambiguous argument" in message
         or "not a valid ref" in message
     )
+
+
+def _unstick_candidates(root: Path, beads: Beads, *, task_id: str | None, verify_mode: str) -> list[UnstickCandidate]:
+    items = [beads.show(task_id)] if task_id else _with_labels(beads.list_active(), {"flow"})
+    candidates: list[UnstickCandidate] = []
+    for item in items:
+        record_path = run_record_path(root, item.id)
+        if not record_path.exists():
+            continue
+        record = RunRecord.load(record_path)
+        stale_running = "running" in item.labels and (
+            record.status != "running" or record.pid is None or not _process_is_running(record.pid)
+        )
+        stale_terminal = item.status == "in_progress" and record.status in {"completed", "reviewed", "landed"}
+        stale_review = "reviewing" in item.labels and record.status == "landed"
+        if not (stale_running or stale_terminal or stale_review):
+            continue
+
+        verification_issues: tuple[str, ...] = ()
+        cheap_commands: tuple[str, ...] = ()
+        if verify_mode == "cheap" and record.status in {"completed", "reviewed", "landed"}:
+            verification_issues, cheap_commands = _cheap_unstick_verification(root, record)
+
+        if record.status == "landed":
+            candidates.append(
+                UnstickCandidate(
+                    task_id=item.id,
+                    action="close-landed",
+                    reason="run record is landed but Beads still shows active state",
+                    record_status=record.status,
+                    bead_status=item.status,
+                    verification_issues=verification_issues,
+                    cheap_commands=cheap_commands,
+                )
+            )
+            continue
+
+        if record.status in {"completed", "reviewed"} and _branch_is_contained(root, record.branch):
+            candidates.append(
+                UnstickCandidate(
+                    task_id=item.id,
+                    action="close-contained",
+                    reason="worker branch is already contained in HEAD but Beads still shows active state",
+                    record_status=record.status,
+                    bead_status=item.status,
+                    verification_issues=verification_issues,
+                    cheap_commands=cheap_commands,
+                )
+            )
+            continue
+
+        if record.status == "completed" and {"reviewed", "reviewing"}.intersection(item.labels):
+            candidates.append(
+                UnstickCandidate(
+                    task_id=item.id,
+                    action="mark-reviewed",
+                    reason="Beads already has review labels but the run record is still completed",
+                    record_status=record.status,
+                    bead_status=item.status,
+                    verification_issues=verification_issues,
+                    cheap_commands=cheap_commands,
+                )
+            )
+    return candidates
+
+
+def _cheap_unstick_verification(root: Path, record: RunRecord) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    issues: list[str] = []
+    raw = _read_result_payload(root, record)
+    result = raw.get("result")
+    if result is None:
+        issues.append("missing or invalid result.json")
+    else:
+        if result.task_id != record.task_id:
+            issues.append("result task_id does not match run record")
+        if result.status != "completed":
+            issues.append(f"result status is {result.status}, not completed")
+        if result.blockers:
+            issues.append("result has blockers")
+        if result.unfinished:
+            issues.append("result has unfinished work")
+
+    verification_values = raw.get("verification_values", [])
+    for command in verification_values:
+        if _looks_like_recorded_failure(command):
+            issues.append(f"recorded verification gap: {command}")
+
+    conflict_scan = _scan_conflict_markers(root)
+    if conflict_scan:
+        issues.append("conflict markers remain in final tree")
+
+    cheap_commands = tuple(command for command in verification_values if _is_cheap_verification_command(command))
+    if cheap_commands:
+        issues.extend(_cheap_verification_issues(root, list(cheap_commands)))
+    return tuple(issues), cheap_commands
+
+
+def _read_result_payload(root: Path, record: RunRecord) -> dict[str, object]:
+    path = result_path(root, record.task_id)
+    if not path.exists():
+        path = Path(record.result)
+    if not path.exists():
+        return {"result": None, "verification_values": []}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        result = WorkerResult.model_validate(data)
+    except Exception:
+        return {"result": None, "verification_values": []}
+    values = data.get("verification", [])
+    commands: list[str] = []
+    if isinstance(values, list):
+        for value in values:
+            if isinstance(value, str):
+                commands.append(value)
+            elif isinstance(value, dict) and isinstance(value.get("command"), str):
+                commands.append(value["command"])
+                if value.get("status") == "failed":
+                    commands.append(f"{value['command']} (failed)")
+    return {"result": result, "verification_values": commands}
+
+
+def _looks_like_recorded_failure(command: str) -> bool:
+    lowered = command.lower()
+    return "failed" in lowered or "err_" in lowered or "error:" in lowered
+
+
+def _is_cheap_verification_command(command: str) -> bool:
+    stripped = command.strip()
+    if "(" in stripped or "failed" in stripped.lower():
+        return False
+    return (
+        stripped.startswith("node --check ")
+        or stripped.startswith("node --test ")
+        or stripped.startswith("node -e ")
+        or stripped.startswith("rg ")
+    )
+
+
+def _scan_conflict_markers(root: Path) -> bool:
+    result = subprocess.run(
+        ["git", "grep", "-n", "-E", r"^(<<<<<<<|=======|>>>>>>>)", "--", ".", ":(exclude).flow"],
+        cwd=root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _cheap_verification_issues(root: Path, commands: list[str]) -> list[str]:
+    issues: list[str] = []
+    normal_commands: list[str] = []
+    for command in commands:
+        if _is_no_match_rg_check(command):
+            if _run_no_match_check(root, command):
+                issues.append(f"cheap verification found matches: {command}")
+        else:
+            normal_commands.append(command)
+    for command in normal_commands:
+        if not _run_command_check(root, command):
+            issues.append(f"cheap verification failed: {command}")
+    return issues
+
+
+def _is_no_match_rg_check(command: str) -> bool:
+    stripped = command.strip()
+    return stripped.startswith("rg ") and ("<<<<<<<" in stripped or ">>>>>>>" in stripped)
+
+
+def _run_no_match_check(root: Path, command: str) -> bool:
+    result = subprocess.run(
+        command,
+        cwd=root,
+        shell=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _run_command_check(root: Path, command: str) -> bool:
+    result = subprocess.run(
+        command,
+        cwd=root,
+        shell=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _branch_is_contained(root: Path, branch: str) -> bool:
+    try:
+        return is_ancestor(root, branch, "HEAD")
+    except GitError:
+        return False
+
+
+def _print_unstick_candidates(candidates: list[UnstickCandidate], *, fix: bool) -> None:
+    table = Table(title="c3x unstick")
+    table.add_column("Task")
+    table.add_column("Action")
+    table.add_column("Run")
+    table.add_column("Bead")
+    table.add_column("Verification")
+    table.add_column("Reason")
+    for candidate in candidates:
+        verification = "ok" if not candidate.verification_issues else f"{len(candidate.verification_issues)} gap(s)"
+        table.add_row(
+            candidate.task_id,
+            candidate.action if fix else f"would {candidate.action}",
+            candidate.record_status,
+            candidate.bead_status or "",
+            verification,
+            candidate.reason,
+        )
+    console.print(table)
+    for candidate in candidates:
+        for issue in candidate.verification_issues:
+            console.print(f"[yellow]{candidate.task_id} verification:[/yellow] {issue}")
+
+
+def _apply_unstick_candidate(root: Path, beads: Beads, candidate: UnstickCandidate) -> None:
+    record = RunRecord.load(run_record_path(root, candidate.task_id))
+    if candidate.action == "mark-reviewed":
+        beads.add_note(candidate.task_id, "c3x unstick repaired stale review state")
+        beads.add_labels(candidate.task_id, ["reviewed", "reviewing"])
+        beads.remove_labels(candidate.task_id, ["running", "blocked"])
+        record.status = "reviewed"
+        record.outcome = "reviewed"
+        record.save(run_record_path(root, candidate.task_id))
+        return
+    if candidate.action in {"close-landed", "close-contained"}:
+        beads.add_note(candidate.task_id, "c3x unstick closed stale active state after local evidence check")
+        beads.close(candidate.task_id, "Closed stale c3x active state after local evidence check")
+        record.status = "landed"
+        record.outcome = "landed"
+        if record.finished_at is None:
+            record.finished_at = _now()
+        record.save(run_record_path(root, candidate.task_id))
+        return
+    raise ValueError(f"unknown unstick action: {candidate.action}")
+
+
+def _maybe_warn_stuck(root: Path, beads: Beads) -> None:
+    candidates = [
+        candidate
+        for candidate in _unstick_candidates(root, beads, task_id=None, verify_mode="none")
+        if candidate.action in {"close-landed", "close-contained"} and _stuck_candidate_is_old(root, candidate)
+    ]
+    if not candidates:
+        return
+    signature = ",".join(sorted(f"{candidate.task_id}:{candidate.action}" for candidate in candidates))
+    notice = _read_stuck_notice(root)
+    if notice.get("signature") == signature and not _notice_cooldown_elapsed(notice.get("updated_at", ""), minutes=30):
+        return
+    path = stuck_notice_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"signature": signature, "updated_at": _now()}, indent=2) + "\n", encoding="utf-8")
+    task_list = ", ".join(candidate.task_id for candidate in candidates[:5])
+    extra = "" if len(candidates) <= 5 else f" and {len(candidates) - 5} more"
+    console.print(
+        "\a[yellow]c3x may be stuck:[/yellow] "
+        f"{len(candidates)} stale active task(s): {task_list}{extra}. "
+        "Run `c3x unstick` to review evidence."
+    )
+
+
+def _stuck_candidate_is_old(root: Path, candidate: UnstickCandidate) -> bool:
+    record = RunRecord.load(run_record_path(root, candidate.task_id))
+    timestamp = record.finished_at or record.started_at
+    try:
+        then = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return False
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - then).total_seconds() >= 600
+
+
+def _read_stuck_notice(root: Path) -> dict[str, str]:
+    path = stuck_notice_path(root)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return {key: value for key, value in data.items() if isinstance(key, str) and isinstance(value, str)}
+
+
+def _notice_cooldown_elapsed(timestamp: str, *, minutes: int) -> bool:
+    try:
+        then = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return True
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - then).total_seconds() >= minutes * 60
 
 
 def _run_cleanup_action(root: Path, action: CleanupAction, *, force: bool) -> None:

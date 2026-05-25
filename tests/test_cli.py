@@ -702,6 +702,171 @@ def test_cleanup_removes_landed_worktree_when_branch_is_already_missing(monkeypa
     assert deleted_branches == ["c3x/bd-1-fix"]
 
 
+def test_unstick_defaults_to_dry_run_with_cheap_verification(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="fix",
+        status="in_progress",
+        labels=("flow", "running", "reviewed"),
+    )
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="completed",
+        finished_at="2026-05-25T00:00:00+00:00",
+    ).save(run_dir / "run.json")
+    (run_dir / "result.json").write_text(
+        WorkerResult(task_id="bd-1", status="completed", summary="done").model_dump_json(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "is_ancestor", lambda root, branch, descendant: True)
+    monkeypatch.setattr(cli, "run_verification", lambda root, commands: [])
+
+    result = runner.invoke(cli.app, ["unstick"])
+
+    assert result.exit_code == 0
+    assert "bd-1" in result.stdout
+    assert "Dry run only" in result.stdout
+    assert "bd-1" in beads.items
+
+
+def test_unstick_fix_skips_recorded_verification_gap_by_default(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="fix",
+        status="in_progress",
+        labels=("flow", "running", "reviewed"),
+    )
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="completed",
+        finished_at="2026-05-25T00:00:00+00:00",
+    ).save(run_dir / "run.json")
+    (run_dir / "result.json").write_text(
+        (
+            WorkerResult(
+                task_id="bd-1",
+                status="completed",
+                summary="done",
+                verification=["npm test (failed with ERR_MODULE_NOT_FOUND)"],
+            ).model_dump_json()
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "is_ancestor", lambda root, branch, descendant: True)
+
+    result = runner.invoke(cli.app, ["unstick", "--fix"])
+
+    assert result.exit_code == 0
+    assert "Skipped" in result.stdout
+    assert "verification has gaps" in result.stdout
+    assert "bd-1" in beads.items
+
+
+def test_unstick_fix_can_accept_recorded_verification_gap(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="fix",
+        status="in_progress",
+        labels=("flow", "running", "reviewed"),
+    )
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="completed",
+        finished_at="2026-05-25T00:00:00+00:00",
+    ).save(run_dir / "run.json")
+    (run_dir / "result.json").write_text(
+        (
+            WorkerResult(
+                task_id="bd-1",
+                status="completed",
+                summary="done",
+                verification=["npm test (failed with ERR_MODULE_NOT_FOUND)"],
+            ).model_dump_json()
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "is_ancestor", lambda root, branch, descendant: True)
+
+    result = runner.invoke(cli.app, ["unstick", "--fix", "--accept-verification-gaps"])
+
+    assert result.exit_code == 0
+    assert "Repaired" in result.stdout
+    assert "bd-1" not in beads.items
+    saved = RunRecord.load(run_dir / "run.json")
+    assert saved.status == "landed"
+
+
+def test_stuck_detector_uses_notice_cooldown(monkeypatch, tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="fix",
+        status="in_progress",
+        labels=("flow", "running", "reviewed"),
+    )
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="completed",
+        finished_at="2026-05-25T00:00:00+00:00",
+    ).save(run_dir / "run.json")
+    (run_dir / "result.json").write_text(
+        WorkerResult(task_id="bd-1", status="completed", summary="done").model_dump_json(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli, "is_ancestor", lambda root, branch, descendant: True)
+
+    cli._maybe_warn_stuck(tmp_path, beads)
+    first_notice = (tmp_path / ".flow" / "stuck-notice.json").read_text(encoding="utf-8")
+    cli._maybe_warn_stuck(tmp_path, beads)
+
+    assert (tmp_path / ".flow" / "stuck-notice.json").read_text(encoding="utf-8") == first_notice
+
+
+def test_cheap_verification_treats_conflict_marker_rg_no_matches_as_pass(tmp_path: Path) -> None:
+    target = tmp_path / "file.js"
+    target.write_text("const ok = true;\n", encoding="utf-8")
+
+    issues = cli._cheap_verification_issues(tmp_path, [r"rg -n '<<<<<<<|=======$|>>>>>>>' file.js"])
+
+    assert issues == []
+
+
 def test_cleanup_repairs_landed_unmerged_branch_after_confirmation(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     calls: list[tuple[str, object]] = []

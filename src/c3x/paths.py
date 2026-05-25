@@ -47,3 +47,7 @@ def pause_path(root: Path) -> Path:
 
 def activity_path(root: Path) -> Path:
     return flow_dir(root) / "activity.json"
+
+
+def stuck_notice_path(root: Path) -> Path:
+    return flow_dir(root) / "stuck-notice.json"
