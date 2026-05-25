@@ -37,6 +37,7 @@ def start_worker(root: Path, config: C3xConfig, task: BeadSummary) -> RunRecord:
         text=True,
         stdout=(prompt.parent / "stdout.log").open("w", encoding="utf-8"),
         stderr=(prompt.parent / "stderr.log").open("w", encoding="utf-8"),
+        start_new_session=True,
     )
     record = RunRecord(
         task_id=task.id,
@@ -98,6 +99,7 @@ def start_conflict_resolver(
         text=True,
         stdout=(prompt.parent / "stdout.log").open("w", encoding="utf-8"),
         stderr=(prompt.parent / "stderr.log").open("w", encoding="utf-8"),
+        start_new_session=True,
     )
     record = RunRecord(
         task_id=task.id,

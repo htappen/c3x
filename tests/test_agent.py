@@ -1,6 +1,8 @@
 from pathlib import Path
 
+from c3x import agent
 from c3x.agent import _agent_command
+from c3x.agent import start_worker
 from c3x.agent import _worker_prompt
 from c3x.config import C3xConfig
 from c3x.beads import BeadSummary
@@ -54,3 +56,30 @@ def test_worker_prompt_forbids_beads_and_git_landing(tmp_path: Path) -> None:
     assert "Do not run Beads commands" in prompt
     assert "Do not run `git commit`, `git push`, `git pull`, `git merge`" in prompt
     assert "The supervisor will commit and merge" in prompt
+
+
+def test_start_worker_launches_in_new_process_session(monkeypatch, tmp_path: Path) -> None:
+    popen_kwargs: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 12345
+
+    def fake_popen(command: list[str], **kwargs: object) -> FakeProcess:
+        popen_kwargs.update(kwargs)
+        return FakeProcess()
+
+    monkeypatch.setattr(agent, "create_worktree", lambda root, branch, worktree: worktree.mkdir(parents=True))
+    monkeypatch.setattr(agent.subprocess, "Popen", fake_popen)
+    config = C3xConfig.model_validate(
+        {
+            "agents": {
+                "codex_command": "fake-codex",
+                "codex_args": ["{prompt}"],
+            }
+        }
+    )
+
+    record = start_worker(tmp_path, config, BeadSummary(id="bd-1", title="Fix auth"))
+
+    assert record.pid == 12345
+    assert popen_kwargs["start_new_session"] is True

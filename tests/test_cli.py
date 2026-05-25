@@ -366,6 +366,121 @@ def test_import_copies_worktree_result_to_run_directory(tmp_path: Path) -> None:
     assert ("bd-1", ["flow", "reviewing", "completed-by-agent"]) in beads.added_labels
 
 
+def test_recover_interrupted_worker_restarts_dead_running_attempt(monkeypatch, tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", labels=("flow", "running"))
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix" / ".c3x" / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        pid=12345,
+        status="running",
+        attempt=1,
+    ).save(run_dir / "run.json")
+
+    def fake_start_worker(root: Path, config: object, task: BeadSummary) -> RunRecord:
+        record = RunRecord(
+            task_id=task.id,
+            branch="c3x/bd-1-fix-attempt-2",
+            worktree=str(root / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-2"),
+            prompt=str(root / ".flow" / "runs" / task.id / "prompt.md"),
+            result=str(root / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-2" / ".c3x" / "result.json"),
+            last_message=str(root / ".flow" / "runs" / task.id / "last-message.md"),
+            pid=67890,
+            attempt=2,
+        )
+        record.save(root / ".flow" / "runs" / task.id / "run.json")
+        return record
+
+    monkeypatch.setattr(cli, "load_config", lambda root: object())
+    monkeypatch.setattr(cli, "_process_is_running", lambda pid: False)
+    monkeypatch.setattr(cli, "start_worker", fake_start_worker)
+
+    cli._recover_interrupted_workers(tmp_path, beads)
+
+    saved = RunRecord.load(run_dir / "run.json")
+    assert saved.attempt == 2
+    assert saved.pid == 67890
+    assert (tmp_path / ".flow" / "runs" / "bd-1-attempt-1" / "run.json").exists()
+    assert ("bd-1", "in_progress") in beads.statuses
+    assert ("bd-1", ["flow", "running", "attempt-2"]) in beads.added_labels
+
+
+def test_kill_workers_dry_run_lists_live_recorded_workers(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    records = [
+        RunRecord(
+            task_id="bd-1",
+            branch="c3x/bd-1-fix",
+            worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"),
+            prompt=str(tmp_path / ".flow" / "runs" / "bd-1" / "prompt.md"),
+            result=str(tmp_path / ".flow" / "runs" / "bd-1" / "result.json"),
+            last_message=str(tmp_path / ".flow" / "runs" / "bd-1" / "last-message.md"),
+            pid=12345,
+            status="running",
+        )
+    ]
+    killed: list[int] = []
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_run_records", lambda root: records)
+    monkeypatch.setattr(cli, "_process_is_running", lambda pid: True)
+    monkeypatch.setattr(cli, "_worker_process_targets", lambda pid: [pid, 12346])
+    monkeypatch.setattr(cli, "_kill_worker_process_tree", lambda pid, force=False: killed.append(pid) or [pid])
+
+    result = runner.invoke(cli.app, ["kill", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "Would send SIGTERM" in result.stdout
+    assert "12345, 12346" in result.stdout
+    assert killed == []
+
+
+def test_kill_workers_sends_signal_to_live_recorded_workers(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    records = [
+        RunRecord(
+            task_id="bd-1",
+            branch="c3x/bd-1-fix",
+            worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"),
+            prompt=str(tmp_path / ".flow" / "runs" / "bd-1" / "prompt.md"),
+            result=str(tmp_path / ".flow" / "runs" / "bd-1" / "result.json"),
+            last_message=str(tmp_path / ".flow" / "runs" / "bd-1" / "last-message.md"),
+            pid=12345,
+            status="running",
+        )
+    ]
+    killed: list[tuple[int, bool]] = []
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_run_records", lambda root: records)
+    monkeypatch.setattr(cli, "_process_is_running", lambda pid: True)
+    monkeypatch.setattr(cli, "_kill_worker_process_tree", lambda pid, force=False: killed.append((pid, force)) or [pid])
+
+    result = runner.invoke(cli.app, ["kill", "--force"])
+
+    assert result.exit_code == 0
+    assert "Sent SIGKILL" in result.stdout
+    assert killed == [(12345, True)]
+
+
+def test_kill_worker_process_tree_avoids_shared_process_group(monkeypatch) -> None:
+    killed_groups: list[tuple[int, int]] = []
+    killed_pids: list[tuple[int, int]] = []
+    monkeypatch.setattr(cli, "_worker_process_targets", lambda pid: [pid, 12346])
+    monkeypatch.setattr(cli.os, "getpgid", lambda pid: 99999)
+    monkeypatch.setattr(cli.os, "killpg", lambda pgid, sig: killed_groups.append((pgid, sig)))
+    monkeypatch.setattr(cli.os, "kill", lambda pid, sig: killed_pids.append((pid, sig)))
+
+    killed = cli._kill_worker_process_tree(12345, force=True)
+
+    assert killed == [12345, 12346]
+    assert killed_groups == []
+    assert killed_pids == [(12346, cli.signal.SIGKILL), (12345, cli.signal.SIGKILL)]
+
+
 def test_retry_archives_current_run_and_starts_fresh_attempt(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _RecordingBeads()

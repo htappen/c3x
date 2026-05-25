@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import shutil
 import subprocess
 import time
@@ -546,6 +547,37 @@ def cleanup(
         raise typer.Exit(_error(str(exc))) from exc
 
 
+@app.command(name="kill")
+def kill_workers(
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show recorded live workers without killing them.")] = False,
+    force: Annotated[bool, typer.Option("--force", help="Send SIGKILL instead of SIGTERM.")] = False,
+    all_runs: Annotated[
+        bool,
+        typer.Option("--all", help="Also inspect non-running run records for live recorded PIDs."),
+    ] = False,
+) -> None:
+    """Kill recorded c3x worker processes for this project."""
+    root = _root()
+    records = [
+        record
+        for record in _run_records(root)
+        if record.pid is not None and (all_runs or record.status == "running") and _process_is_running(record.pid)
+    ]
+    if not records:
+        console.print("[green]No live c3x worker processes found.[/green]")
+        return
+    signal_name = "SIGKILL" if force else "SIGTERM"
+    for record in records:
+        pids = _worker_process_targets(record.pid)
+        if dry_run:
+            console.print(f"[yellow]Would send {signal_name}[/yellow] {record.task_id}: {', '.join(map(str, pids))}")
+            continue
+        killed = _kill_worker_process_tree(record.pid, force=force)
+        console.print(f"[green]Sent {signal_name}[/green] {record.task_id}: {', '.join(map(str, killed))}")
+    if not dry_run:
+        console.print("Restart `c3x watch`; dead running attempts will be imported or restarted on the next tick.")
+
+
 @app.command()
 def unstick(
     task_id: Annotated[str | None, typer.Argument(help="Optional task id to inspect or repair.")] = None,
@@ -770,6 +802,9 @@ def _supervisor_tick(
     resolve_conflicts: bool = False,
 ) -> None:
     beads = _beads(root)
+    if dispatch:
+        _write_activity(root, "recovering interrupted workers")
+        _recover_interrupted_workers(root, beads)
     _write_activity(root, "importing finished worker results")
     _import_finished_results(root, beads)
     _write_activity(root, "planning inbox items")
@@ -1490,6 +1525,64 @@ def _notice_cooldown_elapsed(timestamp: str, *, minutes: int) -> bool:
     return (datetime.now(timezone.utc) - then).total_seconds() >= minutes * 60
 
 
+def _worker_process_targets(pid: int) -> list[int]:
+    return [pid, *_descendant_pids(pid)]
+
+
+def _kill_worker_process_tree(pid: int, *, force: bool) -> list[int]:
+    sig = signal.SIGKILL if force else signal.SIGTERM
+    targets = _worker_process_targets(pid)
+    try:
+        pgid = os.getpgid(pid)
+        if pgid == pid:
+            os.killpg(pgid, sig)
+            return targets
+    except ProcessLookupError:
+        return []
+    except PermissionError:
+        pass
+    for target in reversed(targets):
+        try:
+            os.kill(target, sig)
+        except ProcessLookupError:
+            continue
+    return targets
+
+
+def _descendant_pids(pid: int) -> list[int]:
+    children: dict[int, list[int]] = {}
+    proc = Path("/proc")
+    if not proc.exists():
+        return []
+    for path in proc.iterdir():
+        if not path.name.isdigit():
+            continue
+        try:
+            stat = (path / "stat").read_text(encoding="utf-8")
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            continue
+        ppid = _stat_ppid(stat)
+        if ppid is None:
+            continue
+        children.setdefault(ppid, []).append(int(path.name))
+    descendants: list[int] = []
+    stack = list(children.get(pid, []))
+    while stack:
+        child = stack.pop()
+        descendants.append(child)
+        stack.extend(children.get(child, []))
+    return descendants
+
+
+def _stat_ppid(stat: str) -> int | None:
+    try:
+        after_name = stat.rsplit(")", 1)[1].strip()
+        fields = after_name.split()
+        return int(fields[1])
+    except (IndexError, ValueError):
+        return None
+
+
 def _run_cleanup_action(root: Path, action: CleanupAction, *, force: bool) -> None:
     if action.repair_merge:
         commit_worktree_changes(action.worktree, f"Complete c3x task {action.task_id}")
@@ -1593,6 +1686,29 @@ def _critic_tick(beads: Beads) -> None:
         issue_type="task",
         priority=1,
     )
+
+
+def _recover_interrupted_workers(root: Path, beads: Beads) -> None:
+    config = load_config(root)
+    for record in _run_records(root):
+        if record.status != "running":
+            continue
+        if Path(record.result).exists():
+            continue
+        if record.pid is not None and _process_is_running(record.pid):
+            continue
+        try:
+            _retry_task(root, config, beads, record.task_id)
+            console.print(f"[yellow]Restarted interrupted worker[/yellow] {record.task_id}")
+        except (AgentError, BeadsError, GitError, ValueError) as exc:
+            beads.add_note(record.task_id, f"c3x could not restart interrupted worker: {exc}")
+            beads.add_labels(record.task_id, ["flow", "blocked", "blocker-restart-failed"])
+            beads.remove_labels(record.task_id, ["running", "reviewing"])
+            record.status = "blocked"
+            record.outcome = "restart-failed"
+            record.finished_at = _now()
+            record.save(run_record_path(root, record.task_id))
+            console.print(f"[yellow]Restart blocked[/yellow] {record.task_id}: {exc}")
 
 
 def _import_finished_results(root: Path, beads: Beads) -> None:
