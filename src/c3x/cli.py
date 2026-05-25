@@ -13,11 +13,12 @@ from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 
-from c3x.agent import AgentError, start_worker
+from c3x.agent import AgentError, start_conflict_resolver, start_worker
 from c3x.beads import Beads, BeadsError, BeadSummary
 from c3x.config import FLOW_DIR, load_config, write_default_config
 from c3x.gitops import (
     GitError,
+    GitMergeConflict,
     branch_diff_summary,
     commit_parents,
     commit_ledger_changes,
@@ -241,6 +242,13 @@ def watch(
         bool,
         typer.Option("--cleanup/--no-cleanup", help="Automatically remove landed worktrees and branches."),
     ] = True,
+    resolve_conflicts: Annotated[
+        bool,
+        typer.Option(
+            "--resolve-conflicts/--no-resolve-conflicts",
+            help="Automatically start conflict resolver agents for merge-conflict land blockers.",
+        ),
+    ] = True,
 ) -> None:
     """Run the autonomous c3x watch loop."""
     root = _root()
@@ -257,6 +265,7 @@ def watch(
                 review=review,
                 land=land,
                 cleanup_done=cleanup_done,
+                resolve_conflicts=resolve_conflicts,
             )
             live.update(_build_status_table(root))
             time.sleep(interval)
@@ -303,6 +312,30 @@ def retry(
         for item_id in task_ids:
             record = _retry_task(root, config, beads, item_id)
             console.print(f"[green]Retried[/green] {item_id} as attempt {record.attempt}")
+            console.print(f"Worktree: {record.worktree}")
+    except (AgentError, BeadsError, GitError, ValueError) as exc:
+        raise typer.Exit(_error(str(exc))) from exc
+
+
+@app.command()
+def resolve_conflict(
+    task_id: Annotated[str | None, typer.Argument(help="Merge-conflict-blocked task id to resolve.")] = None,
+    all_tasks: Annotated[
+        bool,
+        typer.Option("--all", help="Resolve all currently merge-conflict-blocked flow tasks."),
+    ] = False,
+) -> None:
+    """Start a conflict resolver worker for merge-conflict-blocked work."""
+    root = _root()
+    _warn_if_risky_flow_branch(root)
+    config = load_config(root)
+    beads = _beads(root)
+    try:
+        _import_finished_results(root, beads)
+        task_ids = _conflict_task_ids(beads, task_id=task_id, all_tasks=all_tasks)
+        for item_id in task_ids:
+            record = _resolve_conflict_task(root, config, beads, item_id)
+            console.print(f"[green]Resolving conflict[/green] {item_id} as attempt {record.attempt}")
             console.print(f"Worktree: {record.worktree}")
     except (AgentError, BeadsError, GitError, ValueError) as exc:
         raise typer.Exit(_error(str(exc))) from exc
@@ -426,9 +459,9 @@ def land(
         record = RunRecord.load(run_record_path(root, task_id))
         if record.status != "reviewed":
             raise ValueError(f"{task_id} is not reviewed")
+        beads = _beads(root)
         commit_worktree_changes(Path(record.worktree), f"Complete c3x task {task_id}")
         merge_branch(root, record.branch)
-        beads = _beads(root)
         beads.close(task_id, "Landed by c3x")
         beads.add_labels(task_id, ["landed"])
         commit_ledger_changes(root, f"Close c3x task {task_id}")
@@ -439,6 +472,10 @@ def land(
         if cleanup_done:
             remove_worktree(root, Path(record.worktree), force=True)
             delete_branch(root, record.branch)
+    except GitMergeConflict as exc:
+        beads = _beads(root)
+        _mark_land_blocked(beads, task_id, exc)
+        raise typer.Exit(_error(str(exc))) from exc
     except (BeadsError, GitError, ValueError) as exc:
         raise typer.Exit(_error(str(exc))) from exc
     console.print(f"[green]Landed[/green] {task_id}")
@@ -579,6 +616,7 @@ def _supervisor_tick(
     review: bool = False,
     land: bool = False,
     cleanup_done: bool = False,
+    resolve_conflicts: bool = False,
 ) -> None:
     beads = _beads(root)
     _import_finished_results(root, beads)
@@ -598,6 +636,11 @@ def _supervisor_tick(
         _auto_review(root, beads)
     if land:
         _auto_land(root, beads, cleanup_done=cleanup_done)
+    if resolve_conflicts:
+        config = load_config(root)
+        for item_id in _conflict_task_ids(beads, task_id=None, all_tasks=True):
+            _resolve_conflict_task(root, config, beads, item_id)
+            console.print(f"[green]Conflict resolver started[/green] {item_id}")
 
 
 def _plan_inbox(root: Path, beads: Beads) -> None:
@@ -719,6 +762,20 @@ def _retry_task_ids(beads: Beads, *, task_id: str | None, all_tasks: bool) -> li
     return [item.id for item in blocked]
 
 
+def _conflict_task_ids(beads: Beads, *, task_id: str | None, all_tasks: bool) -> list[str]:
+    if all_tasks and task_id:
+        raise ValueError("pass either a task id or --all, not both")
+    if not all_tasks and not task_id:
+        raise ValueError("pass a task id or --all")
+    if task_id:
+        task = beads.show(task_id)
+        if not {"flow", "blocked", "land-blocked", "blocker-merge-conflict"}.issubset(set(task.labels)):
+            raise ValueError(f"{task_id} is not blocked on a merge conflict")
+        return [task_id]
+    blocked = _with_labels(beads.list_active(), {"flow", "blocked", "land-blocked", "blocker-merge-conflict"})
+    return [item.id for item in blocked]
+
+
 def _retry_task(root: Path, config: object, beads: Beads, task_id: str) -> RunRecord:
     task = beads.show(task_id)
     _ensure_retryable(root, task_id)
@@ -732,6 +789,40 @@ def _retry_task(root: Path, config: object, beads: Beads, task_id: str) -> RunRe
     beads.remove_labels(task_id, ["ready", "reviewing", "blocked"])
     beads.add_note(task_id, f"c3x retry started attempt {record.attempt}")
     return record
+
+
+def _resolve_conflict_task(root: Path, config: object, beads: Beads, task_id: str) -> RunRecord:
+    task = beads.show(task_id)
+    _ensure_retryable(root, task_id)
+    previous = RunRecord.load(run_record_path(root, task_id))
+    original_result = _read_original_result(root, task_id)
+    target_branch = current_branch(root)
+    target_revision = rev_parse(root, "HEAD")
+    _archive_current_run(root, task_id)
+    beads.set_status(task_id, "open")
+    beads.add_labels(task_id, ["flow", "ready"])
+    beads.remove_labels(task_id, _retry_removed_labels(task))
+    record = start_conflict_resolver(
+        root,
+        config,
+        task,
+        source_branch=previous.branch,
+        target_branch=target_branch,
+        target_revision=target_revision,
+        original_result=original_result,
+    )
+    beads.set_status(task_id, "in_progress")
+    beads.add_labels(task_id, ["flow", "running", "conflict-resolver", f"attempt-{record.attempt}"])
+    beads.remove_labels(task_id, ["ready", "reviewing", "blocked"])
+    beads.add_note(task_id, f"c3x conflict resolver started attempt {record.attempt}")
+    return record
+
+
+def _read_original_result(root: Path, task_id: str) -> str:
+    path = result_path(root, task_id)
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    return "{}"
 
 
 def _ensure_retryable(root: Path, task_id: str) -> None:
@@ -776,6 +867,7 @@ def _retry_removed_labels(task: BeadSummary) -> list[str]:
         "reviewing",
         "reviewed",
         "completed-by-agent",
+        "conflict-resolver",
         "rejected",
         "review-blocked",
         "land-blocked",
@@ -965,10 +1057,27 @@ def _auto_land(root: Path, beads: Beads, *, cleanup_done: bool) -> None:
                 remove_worktree(root, Path(record.worktree), force=True)
                 delete_branch(root, record.branch)
                 console.print(f"[green]Cleaned[/green] {item.id}")
+        except GitMergeConflict as exc:
+            _mark_land_blocked(beads, item.id, exc)
+            console.print(f"[yellow]Land blocked[/yellow] {item.id}: {exc}")
         except (BeadsError, GitError, ValueError) as exc:
             beads.add_note(item.id, f"c3x auto-land blocked: {exc}")
             beads.add_labels(item.id, ["flow", "blocked", "land-blocked"])
             console.print(f"[yellow]Land blocked[/yellow] {item.id}: {exc}")
+
+
+def _mark_land_blocked(beads: Beads, task_id: str, exc: GitMergeConflict) -> None:
+    files = "\n".join(f"- {path}" for path in exc.files) or "- unknown"
+    beads.add_note(
+        task_id,
+        (
+            f"c3x land blocked by merge conflict in {exc.branch}.\n\n"
+            f"Conflicted files:\n{files}\n\n"
+            f"{exc.detail}"
+        ).strip(),
+    )
+    beads.add_labels(task_id, ["flow", "blocked", "land-blocked", "blocker-merge-conflict"])
+    beads.remove_labels(task_id, ["running"])
 
 
 def _critic_tick(beads: Beads) -> None:

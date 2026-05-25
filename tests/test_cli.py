@@ -731,3 +731,106 @@ def test_auto_land_commits_merges_and_force_cleans_worker_worktree(monkeypatch, 
     assert ("merge", "c3x/bd-1-fix") in calls
     assert ("remove_worktree", (worktree, True)) in calls
     assert ("delete_branch", "c3x/bd-1-fix") in calls
+
+
+def test_auto_land_marks_merge_conflict_blocker(monkeypatch, tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="fix",
+        labels=("flow", "reviewing", "reviewed"),
+    )
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="reviewed",
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "commit_worktree_changes", lambda path, message: None)
+
+    def fail_merge(root: Path, branch: str) -> None:
+        raise cli.GitMergeConflict(branch, ["app.py"], "CONFLICT (content): app.py")
+
+    monkeypatch.setattr(cli, "merge_branch", fail_merge)
+
+    cli._auto_land(tmp_path, beads, cleanup_done=True)
+
+    assert ("bd-1", ["flow", "blocked", "land-blocked", "blocker-merge-conflict"]) in beads.added_labels
+    assert any("app.py" in note for task_id, note in beads.notes if task_id == "bd-1")
+
+
+def test_resolve_conflict_starts_resolver_attempt(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="fix",
+        labels=("flow", "blocked", "land-blocked", "blocker-merge-conflict"),
+    )
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="reviewed",
+        attempt=1,
+    ).save(run_dir / "run.json")
+    (run_dir / "result.json").write_text('{"task_id": "bd-1", "status": "completed"}\n', encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def fake_start_conflict_resolver(
+        root: Path,
+        config: object,
+        task: BeadSummary,
+        *,
+        source_branch: str,
+        target_branch: str,
+        target_revision: str,
+        original_result: str,
+    ) -> RunRecord:
+        captured.update(
+            {
+                "source_branch": source_branch,
+                "target_branch": target_branch,
+                "target_revision": target_revision,
+                "original_result": original_result,
+            }
+        )
+        record = RunRecord(
+            task_id=task.id,
+            branch="c3x/bd-1-fix-conflict-attempt-2",
+            worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-conflict-attempt-2"),
+            prompt=str(tmp_path / ".flow" / "runs" / "bd-1" / "prompt.md"),
+            result=str(tmp_path / ".flow" / "runs" / "bd-1" / "result.json"),
+            last_message=str(tmp_path / ".flow" / "runs" / "bd-1" / "last-message.md"),
+            attempt=2,
+        )
+        record.save(tmp_path / ".flow" / "runs" / "bd-1" / "run.json")
+        return record
+
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_warn_if_risky_flow_branch", lambda root: None)
+    monkeypatch.setattr(cli, "load_config", lambda root: object())
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "current_branch", lambda root: "main")
+    monkeypatch.setattr(cli, "rev_parse", lambda root, rev: "abc123")
+    monkeypatch.setattr(cli, "start_conflict_resolver", fake_start_conflict_resolver)
+
+    result = runner.invoke(cli.app, ["resolve-conflict", "bd-1"])
+
+    assert result.exit_code == 0
+    assert captured["source_branch"] == "c3x/bd-1-fix"
+    assert captured["target_branch"] == "main"
+    assert captured["target_revision"] == "abc123"
+    assert "completed" in str(captured["original_result"])
+    assert (tmp_path / ".flow" / "runs" / "bd-1-attempt-1" / "run.json").exists()
+    assert ("bd-1", "in_progress") in beads.statuses
+    assert any("conflict-resolver" in labels for task_id, labels in beads.added_labels if task_id == "bd-1")

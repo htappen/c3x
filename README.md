@@ -104,6 +104,7 @@ Commands:
 | `c3x watch` | Run the autonomous c3x watch loop. |
 | `c3x start` | Start one worker in an isolated git worktree. |
 | `c3x retry` | Start a fresh worker attempt for blocked or stale work. |
+| `c3x resolve-conflict` | Start a conflict resolver worker for merge-conflict-blocked work. |
 | `c3x squash` | Squash c3x-generated commits for landed work. |
 | `c3x agents` | List known local worker runs. |
 | `c3x metrics` | Summarize agent outcomes, retries, unfinished work, and blockers. |
@@ -166,6 +167,7 @@ c3x watch
 c3x watch --no-review
 c3x watch --no-land
 c3x watch --no-cleanup
+c3x watch --no-resolve-conflicts
 c3x watch --interval 10
 c3x pause
 c3x resume
@@ -181,6 +183,7 @@ c3x resume
 - `watch --review/--no-review`: automatically review completed worker results. Default: `--review`.
 - `watch --land/--no-land`: automatically land reviewed work into the current root branch. Default: `--land`.
 - `watch --cleanup/--no-cleanup`: automatically remove landed worktrees and branches. Default: `--cleanup`.
+- `watch --resolve-conflicts/--no-resolve-conflicts`: automatically start resolver workers for merge-conflict land blockers. Default: `--resolve-conflicts`.
 - `pause` / `resume`: create or remove the `.flow/paused` marker used by supervisor loops.
 - Help: `c3x run --help`, `c3x watch --help`
 
@@ -190,6 +193,8 @@ c3x resume
 c3x start <task-id>
 c3x retry <task-id>
 c3x retry --all
+c3x resolve-conflict <task-id>
+c3x resolve-conflict --all
 c3x squash <task-id>
 c3x squash --all
 c3x agents
@@ -198,10 +203,12 @@ c3x agents
 - `start TASK_ID`: start one worker in an isolated git worktree.
 - `retry [TASK_ID]`: archive the current run directory, clear blocked/review labels, and start a fresh attempt using the current agent config.
 - `retry --all`: reconcile stale runs, then retry all currently blocked flow tasks. Mutually exclusive with `TASK_ID`.
+- `resolve-conflict [TASK_ID]`: archive the blocked run and start a resolver worker for a merge-conflict land blocker.
+- `resolve-conflict --all`: resolve all currently merge-conflict-blocked flow tasks. Mutually exclusive with `TASK_ID`.
 - `squash [TASK_ID]`: squash the c3x-generated commits for one landed task when that task is the current branch tip.
 - `squash --all`: squash the eligible landed task segment at the current branch tip without naming the task. Mutually exclusive with `TASK_ID`.
 - `agents`: list known run records, statuses, PIDs, and branches.
-- Help: `c3x start --help`, `c3x retry --help`, `c3x squash --help`, `c3x agents --help`
+- Help: `c3x start --help`, `c3x retry --help`, `c3x resolve-conflict --help`, `c3x squash --help`, `c3x agents --help`
 
 Retry creates attempt-specific branches/worktrees after the first attempt, for example:
 

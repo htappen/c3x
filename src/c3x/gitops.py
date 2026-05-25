@@ -9,6 +9,19 @@ class GitError(RuntimeError):
     pass
 
 
+class GitMergeConflict(GitError):
+    def __init__(self, branch: str, files: list[str], detail: str) -> None:
+        self.branch = branch
+        self.files = files
+        self.detail = detail
+        message = f"merge conflict while merging `{branch}`"
+        if files:
+            message += ": " + ", ".join(files)
+        if detail:
+            message += f"\n{detail}"
+        super().__init__(message)
+
+
 def slug(value: str) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9]+", "-", value.lower()).strip("-")
     return cleaned[:48] or "task"
@@ -37,9 +50,44 @@ def current_branch(root: Path) -> str:
 
 def merge_branch(root: Path, branch: str) -> None:
     commit_ledger_changes(root, "Checkpoint c3x ledger before merge")
-    _git(root, ["merge", "--no-ff", branch, "-m", f"Merge {branch}"])
+    result = _git(
+        root,
+        ["merge", "--no-ff", branch, "-m", f"Merge {branch}"],
+        capture=True,
+        allow_exit_codes={0, 1},
+    )
+    if result.returncode != 0:
+        files = conflicted_files(root)
+        detail = result.stderr.strip() or result.stdout.strip()
+        if files:
+            _git(root, ["merge", "--abort"], allow_exit_codes={0, 1})
+            raise GitMergeConflict(branch, files, detail)
+        raise GitError(f"`git merge --no-ff {branch}` failed: {detail}")
     if not is_ancestor(root, branch, "HEAD"):
         raise GitError(f"`{branch}` was not merged into HEAD")
+
+
+def create_conflict_resolution_worktree(
+    root: Path,
+    *,
+    branch: str,
+    source_branch: str,
+    worktree: Path,
+) -> list[str]:
+    create_worktree(root, branch, worktree)
+    result = _git(
+        worktree,
+        ["merge", "--no-ff", "--no-commit", source_branch],
+        capture=True,
+        allow_exit_codes={0, 1},
+    )
+    if result.returncode == 0:
+        return []
+    files = conflicted_files(worktree)
+    if not files:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise GitError(f"`git merge --no-ff --no-commit {source_branch}` failed: {detail}")
+    return files
 
 
 def commit_worktree_changes(worktree: Path, message: str) -> None:
@@ -70,6 +118,11 @@ def branch_diff_summary(root: Path, branch: str) -> str:
     if status.stdout.strip():
         parts.append("Root status:\n" + status.stdout.strip())
     return "\n\n".join(parts) or "No diff or status output."
+
+
+def conflicted_files(root: Path) -> list[str]:
+    result = _git(root, ["diff", "--name-only", "--diff-filter=U"], capture=True, allow_exit_codes={0, 1})
+    return [line for line in result.stdout.splitlines() if line.strip()]
 
 
 def commit_subject(root: Path, rev: str) -> str:
