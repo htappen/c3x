@@ -279,6 +279,37 @@ def test_status_renders_supervisor_activity_and_worker_latest_message(monkeypatc
     assert "Editing src/c3x/cli.py Running pytest next" in result.stdout
 
 
+def test_run_once_does_not_overwrite_tick_activity_with_waiting(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_build_status_view", lambda root: "")
+    monkeypatch.setattr(
+        cli,
+        "_supervisor_tick",
+        lambda root, *, dispatch: cli._write_activity(root, "tick complete; critic tasks OK"),
+    )
+
+    result = runner.invoke(cli.app, ["run", "--once"])
+
+    assert result.exit_code == 0
+    activity = cli._read_activity(tmp_path)
+    assert activity["supervisor"] == "tick complete; critic tasks OK"
+    assert "waiting" not in activity["supervisor"]
+
+
+def test_supervisor_tick_records_critic_outcome(monkeypatch, tmp_path: Path) -> None:
+    beads = _StatusBeads()
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "_import_finished_results", lambda root, beads: None)
+    monkeypatch.setattr(cli, "_plan_inbox", lambda root, beads: None)
+    monkeypatch.setattr(cli, "_maybe_warn_stuck", lambda root, beads: None)
+
+    cli._supervisor_tick(tmp_path, dispatch=False)
+
+    activity = cli._read_activity(tmp_path)
+    assert activity["supervisor"] == "tick complete; critic tasks OK"
+
+
 def test_answer_marks_blocking_item_clarified(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _RecordingBeads()

@@ -249,7 +249,6 @@ def run(
                 time.sleep(interval)
                 continue
             _supervisor_tick(root, dispatch=dispatch)
-            _write_activity(root, f"waiting {interval}s before next tick")
             live.update(_build_status_view(root))
             if once:
                 return
@@ -298,7 +297,6 @@ def watch(
                 cleanup_done=cleanup_done,
                 resolve_conflicts=resolve_conflicts,
             )
-            _write_activity(root, f"waiting {interval}s before next tick")
             live.update(_build_status_view(root))
             time.sleep(interval)
 
@@ -810,7 +808,8 @@ def _supervisor_tick(
     _write_activity(root, "planning inbox items")
     _plan_inbox(root, beads)
     _write_activity(root, "checking critic tasks")
-    _critic_tick(beads)
+    critic_activity = _critic_tick(beads)
+    _write_activity(root, f"checking critic tasks; {critic_activity}")
     if dispatch:
         _write_activity(root, "checking worker capacity")
         config = load_config(root)
@@ -837,7 +836,7 @@ def _supervisor_tick(
             _resolve_conflict_task(root, config, beads, item_id)
             console.print(f"[green]Conflict resolver started[/green] {item_id}")
     _maybe_warn_stuck(root, beads)
-    _write_activity(root, "tick complete")
+    _write_activity(root, f"tick complete; {critic_activity}")
 
 
 def _plan_inbox(root: Path, beads: Beads) -> None:
@@ -1663,10 +1662,10 @@ def _mark_land_blocked(beads: Beads, task_id: str, exc: GitMergeConflict) -> Non
     beads.remove_labels(task_id, ["running"])
 
 
-def _critic_tick(beads: Beads) -> None:
+def _critic_tick(beads: Beads) -> str:
     blocked = _with_labels(beads.list_active(), {"flow", "blocked"})
     if len(blocked) < 2:
-        return
+        return "critic tasks OK"
     existing = [
         item
         for item in beads.list_active()
@@ -1674,8 +1673,8 @@ def _critic_tick(beads: Beads) -> None:
         and "blocked tasks need investigation" in item.title.lower()
     ]
     if existing:
-        return
-    beads.create_task(
+        return "critic task already exists"
+    created = beads.create_task(
         "Blocked tasks need investigation",
         description=(
             f"c3x critic found {len(blocked)} blocked tasks.\n\n"
@@ -1686,6 +1685,7 @@ def _critic_tick(beads: Beads) -> None:
         issue_type="task",
         priority=1,
     )
+    return f"created critic task {created.get('id', '<unknown>')}"
 
 
 def _recover_interrupted_workers(root: Path, beads: Beads) -> None:
