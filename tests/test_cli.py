@@ -496,7 +496,88 @@ def test_import_blocks_exited_worker_missing_result(monkeypatch, tmp_path: Path)
     assert saved.outcome == "missing-result"
     assert ("bd-1", ["flow", "blocked", "blocker-result-missing"]) in beads.added_labels
     assert ("bd-1", ["running", "reviewing"]) in beads.removed_labels
-    assert any("Could not write result.json" in note for _, note in beads.notes)
+    assert any("Worker produced a final message" in note for _, note in beads.notes)
+    assert any("last_message_path:" in note for _, note in beads.notes)
+
+
+def test_missing_result_note_summarizes_logs_without_embedding_them(monkeypatch, tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", labels=("flow", "running"))
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    run_dir.mkdir(parents=True)
+    last_message = run_dir / "last-message.md"
+    stderr = run_dir / "stderr.log"
+    last_message.write_text(
+        "Wrote [`.c3x/result.json`](/tmp/wrong/.c3x/result.json).\n" * 80,
+        encoding="utf-8",
+    )
+    stderr.write_text(
+        "very long stderr line\n" * 1000,
+        encoding="utf-8",
+    )
+    record = RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(last_message),
+        pid=12345,
+    )
+    record.save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "_process_is_running", lambda pid: False)
+
+    cli._import_finished_results(tmp_path, beads)
+
+    note = beads.notes[-1][1]
+    assert "summary: Worker reported writing result.json, but not at the expected path." in note
+    assert "last_message_path:" in note
+    assert "stderr_path:" in note
+    assert "very long stderr line\nvery long stderr line" not in note
+    assert len(note) < 1000
+
+
+def test_missing_result_beads_write_failure_does_not_abort_import(monkeypatch, tmp_path: Path) -> None:
+    class FailingBeads(_RecordingBeads):
+        def add_note(self, task_id: str, note: str) -> None:
+            raise cli.BeadsError("old_value is too large")
+
+        def add_labels(self, task_id: str, labels: list[str]) -> None:
+            raise cli.BeadsError("old_value is too large")
+
+        def remove_labels(self, task_id: str, labels: list[str]) -> None:
+            raise cli.BeadsError("old_value is too large")
+
+    beads = FailingBeads()
+    beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", labels=("flow", "running"))
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    run_dir.mkdir(parents=True)
+    record = RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        pid=12345,
+    )
+    record.save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "_process_is_running", lambda pid: False)
+
+    cli._import_finished_results(tmp_path, beads)
+
+    saved = RunRecord.load(run_dir / "run.json")
+    assert saved.status == "blocked"
+    assert saved.outcome == "missing-result"
+
+
+def test_beads_error_summary_omits_large_rejected_payload() -> None:
+    summary = cli._beads_error_summary(
+        cli.BeadsError("failed: Error 1105: string '{\"notes\":\"very long\"}' is too large for column 'old_value'")
+    )
+
+    assert summary == "Beads rejected the update because the existing issue payload is too large for its event log."
+    assert "very long" not in summary
 
 
 def test_import_copies_worktree_result_to_run_directory(tmp_path: Path) -> None:
@@ -534,6 +615,51 @@ def test_import_copies_worktree_result_to_run_directory(tmp_path: Path) -> None:
     assert WorkerResult.model_validate_json(canonical_result.read_text(encoding="utf-8")).summary == "Fixed it"
     assert saved.status == "completed"
     assert ("bd-1", ["flow", "reviewing", "completed-by-agent"]) in beads.added_labels
+
+
+def test_import_completed_result_survives_beads_write_failure(tmp_path: Path) -> None:
+    class FailingBeads(_RecordingBeads):
+        def add_note(self, task_id: str, note: str) -> None:
+            raise cli.BeadsError("old_value is too large")
+
+        def add_labels(self, task_id: str, labels: list[str]) -> None:
+            raise cli.BeadsError("old_value is too large")
+
+        def remove_labels(self, task_id: str, labels: list[str]) -> None:
+            raise cli.BeadsError("old_value is too large")
+
+    beads = FailingBeads()
+    beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", labels=("flow", "running"))
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    worker_result = worktree / ".c3x" / "result.json"
+    worker_result.parent.mkdir(parents=True)
+    worker_result.write_text(
+        WorkerResult(
+            task_id="bd-1",
+            status="completed",
+            summary="Fixed it",
+            task_kind="bug",
+            confidence="high",
+        ).model_dump_json(),
+        encoding="utf-8",
+    )
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(worker_result),
+        last_message=str(run_dir / "last-message.md"),
+        pid=12345,
+    ).save(run_dir / "run.json")
+
+    cli._import_finished_results(tmp_path, beads)
+
+    saved = RunRecord.load(run_dir / "run.json")
+    assert saved.status == "completed"
+    assert saved.outcome == "completed"
+    assert (run_dir / "result.json").exists()
 
 
 def test_recover_interrupted_worker_resumes_transient_session(monkeypatch, tmp_path: Path) -> None:

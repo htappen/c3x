@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Callable, Literal
 
 import typer
 from rich.console import Console, Group
@@ -1921,23 +1921,47 @@ def _import_finished_results(root: Path, beads: Beads) -> None:
         result_text = result_file.read_text(encoding="utf-8")
         result = WorkerResult.model_validate_json(result_text)
         if result.task_id != record.task_id:
-            beads.add_note(record.task_id, "Worker result rejected: task id mismatch")
-            beads.add_labels(record.task_id, ["flow", "blocked", "rejected", "blocker-result-schema"])
+            _try_beads_write(
+                f"record rejected result for {record.task_id}",
+                lambda: beads.add_note(record.task_id, "Worker result rejected: task id mismatch"),
+            )
+            _try_beads_write(
+                f"mark {record.task_id} rejected",
+                lambda: beads.add_labels(record.task_id, ["flow", "blocked", "rejected", "blocker-result-schema"]),
+            )
             record.status = "blocked"
             record.outcome = "rejected"
         elif result.status == "completed":
             _save_canonical_result(root, record.task_id, result_text)
-            beads.add_note(record.task_id, _result_note(result))
-            beads.add_labels(record.task_id, ["flow", "reviewing", "completed-by-agent"])
-            beads.remove_labels(record.task_id, ["running", "blocked"])
+            _try_beads_write(
+                f"record completed result for {record.task_id}",
+                lambda: beads.add_note(record.task_id, _result_note(result)),
+            )
+            _try_beads_write(
+                f"mark {record.task_id} reviewing",
+                lambda: beads.add_labels(record.task_id, ["flow", "reviewing", "completed-by-agent"]),
+            )
+            _try_beads_write(
+                f"remove running labels from {record.task_id}",
+                lambda: beads.remove_labels(record.task_id, ["running", "blocked"]),
+            )
             record.status = "completed"
             record.outcome = "completed"
         else:
             _save_canonical_result(root, record.task_id, result_text)
-            beads.add_note(record.task_id, _result_note(result))
+            _try_beads_write(
+                f"record blocked result for {record.task_id}",
+                lambda: beads.add_note(record.task_id, _result_note(result)),
+            )
             category = result.blocker_category or "unknown"
-            beads.add_labels(record.task_id, ["flow", "blocked", f"blocker-{category}"])
-            beads.remove_labels(record.task_id, ["running", "reviewing"])
+            _try_beads_write(
+                f"mark {record.task_id} blocked",
+                lambda: beads.add_labels(record.task_id, ["flow", "blocked", f"blocker-{category}"]),
+            )
+            _try_beads_write(
+                f"remove running labels from {record.task_id}",
+                lambda: beads.remove_labels(record.task_id, ["running", "reviewing"]),
+            )
             record.status = "blocked"
             record.outcome = result.status
         record.finished_at = _now()
@@ -1957,29 +1981,90 @@ def _block_missing_worker_result(root: Path, beads: Beads, record: RunRecord) ->
         "The supervisor marked this task blocked so it can be retried or fixed by a user.\n\n"
         f"{evidence}"
     )
-    beads.add_note(record.task_id, note)
-    beads.add_labels(record.task_id, ["flow", "blocked", "blocker-result-missing"])
-    beads.remove_labels(record.task_id, ["running", "reviewing"])
+    note_saved = _try_beads_write(
+        f"record missing-result note for {record.task_id}",
+        lambda: beads.add_note(record.task_id, note),
+    )
+    labels_added = _try_beads_write(
+        f"mark {record.task_id} blocked",
+        lambda: beads.add_labels(record.task_id, ["flow", "blocked", "blocker-result-missing"]),
+    )
+    labels_removed = _try_beads_write(
+        f"remove running labels from {record.task_id}",
+        lambda: beads.remove_labels(record.task_id, ["running", "reviewing"]),
+    )
     record.status = "blocked"
     record.outcome = "missing-result"
     record.finished_at = _now()
     record.save(run_record_path(root, record.task_id))
-    console.print(f"[yellow]Blocked[/yellow] {record.task_id}: worker exited without result.json")
+    if note_saved and labels_added and labels_removed:
+        console.print(f"[yellow]Blocked[/yellow] {record.task_id}: worker exited without result.json")
+    else:
+        console.print(
+            f"[yellow]Blocked locally[/yellow] {record.task_id}: worker exited without result.json; "
+            "some Beads updates failed"
+        )
+
+
+def _try_beads_write(action: str, write: Callable[[], None]) -> bool:
+    try:
+        write()
+    except BeadsError as exc:
+        console.print(f"[yellow]warning:[/yellow] could not {action}: {_beads_error_summary(exc)}")
+        return False
+    return True
+
+
+def _beads_error_summary(exc: BeadsError) -> str:
+    message = _one_line(str(exc))
+    lower = message.lower()
+    if "too large for column 'old_value'" in lower:
+        return "Beads rejected the update because the existing issue payload is too large for its event log."
+    if "too large" in lower:
+        return "Beads rejected the update because the issue payload is too large."
+    return message[:500]
 
 
 def _missing_result_evidence(record: RunRecord) -> str:
+    last_message_path = Path(record.last_message)
+    stderr_path = Path(record.prompt).parent / "stderr.log"
     lines = [
         f"pid: {record.pid}",
         f"attempt: {record.attempt}",
         f"expected_result: {record.result}",
+        f"last_message_path: {last_message_path}",
+        f"stderr_path: {stderr_path}",
+        f"summary: {_missing_result_summary(record, last_message_path=last_message_path, stderr_path=stderr_path)}",
     ]
-    last_message = _read_tail(Path(record.last_message), max_chars=4000)
-    if last_message:
-        lines.append(f"last_message:\n{last_message}")
-    stderr = _read_tail(Path(record.prompt).parent / "stderr.log", max_chars=4000)
-    if stderr:
-        lines.append(f"stderr_tail:\n{stderr}")
     return "\n\n".join(lines)
+
+
+def _missing_result_summary(record: RunRecord, *, last_message_path: Path, stderr_path: Path) -> str:
+    last_message = _read_tail(last_message_path, max_chars=2000)
+    stderr = _read_tail(stderr_path, max_chars=12000)
+    combined = f"{last_message}\n{stderr}".lower()
+    if "you've hit your usage limit" in combined or "usage limit" in combined:
+        return "Codex usage limit stopped the worker before c3x found result.json."
+    if "rate limit" in combined or "429" in combined:
+        return "Codex rate limit stopped the worker before c3x found result.json."
+    if "failed to lookup address information" in combined or "failed to connect" in combined:
+        return "Network/DNS failure stopped the worker before c3x found result.json."
+    if "stream disconnected before completion" in combined or "error sending request" in combined:
+        return "Codex stream disconnected before c3x found result.json."
+    if (
+        "wrote [`.c3x/result.json`]" in combined
+        or "wrote .c3x/result.json" in combined
+        or "session result saved at" in combined
+    ):
+        return (
+            "Worker reported writing result.json, but not at the expected path. "
+            "Check last_message_path and stderr_path for the reported location."
+        )
+    if last_message:
+        return "Worker produced a final message, but c3x did not find result.json at expected_result."
+    if stderr:
+        return "Worker stderr exists, but c3x did not find result.json at expected_result."
+    return "Worker exited without writing result.json; see paths above for available logs."
 
 
 def _read_tail(path: Path, *, max_chars: int) -> str:
