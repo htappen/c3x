@@ -53,6 +53,7 @@ class _RecordingBeads:
         self.removed_labels: list[tuple[str, list[str]]] = []
         self.statuses: list[tuple[str, str]] = []
         self.closed: list[tuple[str, str]] = []
+        self.compacted: list[tuple[str, str]] = []
         self.next_id = 1
 
     def create_inbox_item(
@@ -126,6 +127,11 @@ class _RecordingBeads:
     def close(self, task_id: str, note: str) -> None:
         self.closed.append((task_id, note))
         self.items.pop(task_id, None)
+
+    def compact_issue(self, task_id: str, summary: str) -> None:
+        self.compacted.append((task_id, summary))
+        item = self.items[task_id]
+        self.items[task_id] = replace(item, description=summary, notes="")
 
 
 def test_start_warns_when_root_branch_is_main(monkeypatch, tmp_path: Path) -> None:
@@ -1281,6 +1287,81 @@ def test_cleanup_ignores_landed_record_when_branch_and_worktree_are_missing(monk
 
     assert result.exit_code == 0
     assert "Nothing to clean" in result.stdout
+
+
+def test_cleanup_repair_beads_compacts_oversized_flow_payload(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="bloated",
+        status="blocked",
+        description="large description\n" * 900,
+        notes="large notes\n" * 900,
+        labels=("flow", "blocked"),
+    )
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+
+    result = runner.invoke(cli.app, ["cleanup", "--repair-beads"])
+
+    assert result.exit_code == 0
+    assert result.stdout.count("Repaired Beads payload") == 1
+    assert "Nothing to clean" in result.stdout
+    assert beads.compacted[0][0] == "bd-1"
+    assert "too large for Beads event-log updates" in beads.compacted[0][1]
+    assert "bd restore bd-1" in beads.compacted[0][1]
+
+
+def test_cleanup_repair_beads_dry_run_leaves_payload(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    description = "large description\n" * 900
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="bloated",
+        description=description,
+        labels=("flow", "blocked"),
+    )
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+
+    result = runner.invoke(cli.app, ["cleanup", "--repair-beads", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "Would repair Beads payload" in result.stdout
+    assert beads.compacted == []
+    assert beads.items["bd-1"].description == description
+
+
+def test_cleanup_repair_beads_allows_non_landed_target(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="bloated",
+        description="large description\n" * 900,
+        labels=("flow", "blocked"),
+    )
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="blocked",
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+
+    result = runner.invoke(cli.app, ["cleanup", "bd-1", "--repair-beads"])
+
+    assert result.exit_code == 0
+    assert "Repaired Beads payload" in result.stdout
+    assert "Nothing to clean" in result.stdout
+    assert beads.compacted[0][0] == "bd-1"
 
 
 def test_unstick_defaults_to_dry_run_with_cheap_verification(monkeypatch, tmp_path: Path) -> None:

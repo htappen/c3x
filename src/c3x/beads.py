@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -108,6 +109,15 @@ class Beads:
 
     def close(self, task_id: str, reason: str) -> None:
         self._run(["close", task_id, "--reason", reason], expect_json=False)
+
+    def compact_issue(self, task_id: str, summary: str) -> None:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md", delete=True) as summary_file:
+            summary_file.write(summary)
+            summary_file.flush()
+            self._run(
+                ["admin", "compact", "--apply", "--id", task_id, "--summary", summary_file.name, "--force"],
+                expect_json=False,
+            )
 
     def create_task(
         self,

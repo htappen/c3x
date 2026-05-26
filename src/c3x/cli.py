@@ -568,11 +568,20 @@ def cleanup(
         bool,
         typer.Option("--force", help="Force-remove dirty stale worktrees and unmerged stale branches."),
     ] = False,
+    repair_beads: Annotated[
+        bool,
+        typer.Option(
+            "--repair-beads",
+            help="Compact oversized Beads payloads that make bd updates fail.",
+        ),
+    ] = False,
 ) -> None:
     """Remove landed task worktrees and superseded stale attempts."""
     root = _root()
     try:
-        actions = _cleanup_actions(root, task_id=task_id)
+        if repair_beads:
+            _repair_large_beads_payloads(root, _beads(root), task_id=task_id, dry_run=dry_run)
+        actions = _cleanup_actions(root, task_id=task_id, require_task_cleanup=not repair_beads)
         if not actions:
             console.print("[green]Nothing to clean.[/green]")
             return
@@ -585,7 +594,7 @@ def cleanup(
                 continue
             _run_cleanup_action(root, action, force=force)
             console.print(f"[green]Cleaned[/green] {action.reason}: {action.task_id}")
-    except (GitError, ValueError) as exc:
+    except (BeadsError, GitError, ValueError) as exc:
         raise typer.Exit(_error(str(exc))) from exc
 
 
@@ -1328,7 +1337,7 @@ def _squash_message(root: Path, task_id: str) -> str:
     return f"Complete c3x task {task_id}"
 
 
-def _cleanup_actions(root: Path, *, task_id: str | None) -> list[CleanupAction]:
+def _cleanup_actions(root: Path, *, task_id: str | None, require_task_cleanup: bool = True) -> list[CleanupAction]:
     records = _run_record_paths(root)
     canonical = {
         record.task_id: record
@@ -1382,11 +1391,55 @@ def _cleanup_actions(root: Path, *, task_id: str | None) -> list[CleanupAction]:
                     remove_run_dir=True,
                 )
             )
-    if task_id and not actions:
+    if task_id and not actions and require_task_cleanup:
         current = canonical.get(task_id)
         if current and current.status != "landed":
             raise ValueError(f"{task_id} is not landed and has no superseded attempts")
     return actions
+
+
+def _repair_large_beads_payloads(root: Path, beads: Beads, *, task_id: str | None, dry_run: bool) -> None:
+    del root
+    items = [beads.show(task_id)] if task_id else _with_labels(beads.list_active(), {"flow"})
+    candidates = [item for item in items if _bead_payload_size(item) >= 12_000]
+    if not candidates:
+        console.print("[green]No oversized Beads payloads found.[/green]")
+        return
+    for item in candidates:
+        size = _bead_payload_size(item)
+        if dry_run:
+            console.print(f"[yellow]Would repair Beads payload[/yellow] {item.id}: {size} bytes")
+            continue
+        beads.compact_issue(item.id, _large_bead_compaction_summary(item, size))
+        console.print(f"[green]Repaired Beads payload[/green] {item.id}: {size} bytes")
+
+
+def _bead_payload_size(item: BeadSummary) -> int:
+    return len((item.description or "").encode("utf-8")) + len((item.notes or "").encode("utf-8"))
+
+
+def _large_bead_compaction_summary(item: BeadSummary, size: int) -> str:
+    labels = ", ".join(item.labels) if item.labels else "none"
+    body = item.description or item.notes or ""
+    return (
+        "c3x compacted this Beads entry because its description/notes payload "
+        "was too large for Beads event-log updates.\n\n"
+        f"Original payload size: {size} bytes\n"
+        f"Title: {item.title}\n"
+        f"Status: {item.status or 'unknown'}\n"
+        f"Labels: {labels}\n\n"
+        "Preserved excerpt:\n"
+        f"{_compact_excerpt(body, limit=1200)}\n\n"
+        "Run `bd restore "
+        f"{item.id}` to inspect pre-compaction content if Dolt history still contains it."
+    )
+
+
+def _compact_excerpt(text: str, *, limit: int) -> str:
+    normalized = _one_line(text).strip()
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3].rstrip() + "..."
 
 
 def _is_superseded_attempt(record: RunRecord, current: RunRecord | None) -> bool:
