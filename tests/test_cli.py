@@ -740,6 +740,66 @@ def test_import_ignores_archived_running_records(monkeypatch, tmp_path: Path) ->
     assert not beads.added_labels
 
 
+def test_land_repairs_current_record_from_archived_completed_result(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", labels=("flow", "reviewing", "reviewed"))
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    archived_dir = tmp_path / ".flow" / "runs" / "bd-1-attempt-2"
+    stale_worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-2"
+    actual_worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-3"
+    actual_result = actual_worktree / ".c3x" / "result.json"
+    actual_result.parent.mkdir(parents=True)
+    actual_result.write_text(
+        WorkerResult(task_id="bd-1", status="completed", summary="Fixed it").model_dump_json(),
+        encoding="utf-8",
+    )
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix-attempt-2",
+        worktree=str(stale_worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(stale_worktree / ".c3x" / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="reviewed",
+        attempt=2,
+    ).save(run_dir / "run.json")
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix-attempt-2",
+        worktree=str(stale_worktree),
+        prompt=str(archived_dir / "prompt.md"),
+        result=str(stale_worktree / ".c3x" / "result.json"),
+        last_message=str(archived_dir / "last-message.md"),
+        status="blocked",
+        attempt=2,
+    ).save(archived_dir / "run.json")
+    (archived_dir / "last-message.md").write_text(
+        f"Result written to [`.c3x/result.json`]({actual_result}).\n",
+        encoding="utf-8",
+    )
+    calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(beads, "close", lambda task_id, note: beads.closed.append((task_id, note)))
+    monkeypatch.setattr(cli, "current_branch", lambda worktree: "c3x/bd-1-fix-attempt-3")
+    monkeypatch.setattr(cli, "commit_worktree_changes", lambda path, message: calls.append(("commit", path)))
+    monkeypatch.setattr(cli, "merge_branch", lambda root, branch: calls.append(("merge", branch)))
+    monkeypatch.setattr(cli, "commit_ledger_changes", lambda root, message: None)
+    monkeypatch.setattr(cli, "remove_worktree", lambda root, path, force=False: None)
+    monkeypatch.setattr(cli, "delete_branch", lambda root, branch, force=False: None)
+
+    result = runner.invoke(cli.app, ["land", "bd-1"])
+
+    assert result.exit_code == 0
+    assert ("commit", actual_worktree) in calls
+    assert ("merge", "c3x/bd-1-fix-attempt-3") in calls
+    saved = RunRecord.load(run_dir / "run.json")
+    assert saved.attempt == 3
+    assert saved.worktree == str(actual_worktree)
+    assert saved.branch == "c3x/bd-1-fix-attempt-3"
+
+
 def test_missing_result_note_summarizes_logs_without_embedding_them(monkeypatch, tmp_path: Path) -> None:
     beads = _RecordingBeads()
     beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", labels=("flow", "running"))

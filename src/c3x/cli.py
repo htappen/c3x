@@ -1254,9 +1254,25 @@ def _load_repaired_current_run_record(root: Path, task_id: str) -> RunRecord:
     path = run_record_path(root, task_id)
     record = RunRecord.load(path)
     repaired = _repaired_run_record(path, record)
+    if _record_points_to_missing_result_or_worktree(repaired):
+        completed_evidence = _completed_result_evidence(root, task_id)
+        if completed_evidence is not None:
+            evidence_record, _ = completed_evidence
+            repaired = repaired.model_copy(
+                update={
+                    "branch": evidence_record.branch,
+                    "worktree": evidence_record.worktree,
+                    "result": evidence_record.result,
+                    "attempt": evidence_record.attempt,
+                }
+            )
     if repaired != record:
         repaired.save(path)
     return repaired
+
+
+def _record_points_to_missing_result_or_worktree(record: RunRecord) -> bool:
+    return not Path(record.worktree).exists() or not Path(record.result).exists()
 
 
 def _session_id_for_run(record: RunRecord | None) -> str | None:
