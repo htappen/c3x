@@ -154,7 +154,7 @@ def inbox() -> None:
     try:
         items = [
             item
-            for item in _beads(root).list_open()
+            for item in _beads(root).list_active()
             if {"flow", "inbox", "idea"}.issubset(set(item.labels))
         ]
     except BeadsError as exc:

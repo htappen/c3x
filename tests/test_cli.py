@@ -229,6 +229,24 @@ def test_add_validate_asks_clarification_then_plans(monkeypatch, tmp_path: Path)
     assert ("bd-1", "Planned as bd-3") in beads.closed
 
 
+def test_inbox_uses_same_active_items_as_status(monkeypatch, tmp_path: Path) -> None:
+    class ActiveOnlyBeads(_RecordingBeads):
+        def list_open(self) -> list[BeadSummary]:
+            raise AssertionError("inbox should use list_active")
+
+    runner = CliRunner()
+    beads = ActiveOnlyBeads()
+    beads.items["bd-1"] = BeadSummary(id="bd-1", title="triage me", labels=("flow", "inbox", "idea"))
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+
+    result = runner.invoke(cli.app, ["inbox"])
+
+    assert result.exit_code == 0
+    assert "bd-1" in result.stdout
+    assert "triage me" in result.stdout
+
+
 def test_status_renders_bucket_counts(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _StatusBeads()
