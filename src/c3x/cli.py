@@ -1406,16 +1406,37 @@ def _repair_large_beads_payloads(root: Path, beads: Beads, *, task_id: str | Non
         console.print("[green]No oversized Beads payloads found.[/green]")
         return
     for item in candidates:
-        size = _bead_payload_size(item)
+        before_size = _bead_payload_size(item)
+        summary = _large_bead_compaction_summary(item, before_size)
+        after_size = _compacted_bead_payload_size(summary)
         if dry_run:
-            console.print(f"[yellow]Would repair Beads payload[/yellow] {item.id}: {size} bytes")
+            console.print(
+                f"[yellow]Would repair Beads payload[/yellow] {item.id}: "
+                f"{_format_bytes(before_size)} -> {_format_bytes(after_size)}"
+            )
             continue
-        beads.compact_issue(item.id, _large_bead_compaction_summary(item, size), issue=item)
-        console.print(f"[green]Repaired Beads payload[/green] {item.id}: {size} bytes")
+        beads.compact_issue(item.id, summary, issue=item)
+        console.print(
+            f"[green]Repaired Beads payload[/green] {item.id}: "
+            f"{_format_bytes(before_size)} -> {_format_bytes(after_size)}"
+        )
 
 
 def _bead_payload_size(item: BeadSummary) -> int:
     return len((item.description or "").encode("utf-8")) + len((item.notes or "").encode("utf-8"))
+
+
+def _compacted_bead_payload_size(summary: str) -> int:
+    notes = "c3x compacted oversized notes into the issue description summary."
+    return len(summary.encode("utf-8")) + len(notes.encode("utf-8"))
+
+
+def _format_bytes(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KiB"
+    return f"{size / (1024 * 1024):.1f} MiB"
 
 
 def _large_bead_compaction_summary(item: BeadSummary, size: int) -> str:

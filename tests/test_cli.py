@@ -1307,6 +1307,7 @@ def test_cleanup_repair_beads_compacts_oversized_flow_payload(monkeypatch, tmp_p
 
     assert result.exit_code == 0
     assert result.stdout.count("Repaired Beads payload") == 1
+    assert "KiB ->" in result.stdout
     assert "Nothing to clean" in result.stdout
     assert beads.compacted[0][0] == "bd-1"
     assert "too large for Beads event-log updates" in beads.compacted[0][1]
@@ -1330,6 +1331,7 @@ def test_cleanup_repair_beads_dry_run_leaves_payload(monkeypatch, tmp_path: Path
 
     assert result.exit_code == 0
     assert "Would repair Beads payload" in result.stdout
+    assert "KiB ->" in result.stdout
     assert beads.compacted == []
     assert beads.items["bd-1"].description == description
 
@@ -1360,6 +1362,7 @@ def test_cleanup_repair_beads_allows_non_landed_target(monkeypatch, tmp_path: Pa
 
     assert result.exit_code == 0
     assert "Repaired Beads payload" in result.stdout
+    assert "KiB ->" in result.stdout
     assert "Nothing to clean" in result.stdout
     assert beads.compacted[0][0] == "bd-1"
 
