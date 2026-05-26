@@ -100,6 +100,9 @@ class _RecordingBeads:
     def list_active(self) -> list[BeadSummary]:
         return list(self.items.values())
 
+    def ready(self) -> list[BeadSummary]:
+        return [item for item in self.items.values() if "ready" in item.labels]
+
     def show(self, task_id: str) -> BeadSummary:
         return self.items[task_id]
 
@@ -266,7 +269,39 @@ def test_status_renders_bucket_counts(monkeypatch, tmp_path: Path) -> None:
     assert "Inbox" in result.stdout
     assert "Questions" in result.stdout
     assert "Max parallel workers" in result.stdout
+    assert "Ready to land" in result.stdout
     assert "3" in result.stdout
+
+
+def test_status_reviewing_count_excludes_reviewed_and_land_blocked(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-review"] = BeadSummary(id="bd-review", title="needs review", labels=("flow", "reviewing"))
+    beads.items["bd-land"] = BeadSummary(
+        id="bd-land",
+        title="ready to land",
+        labels=("flow", "reviewing", "reviewed"),
+    )
+    beads.items["bd-blocked"] = BeadSummary(
+        id="bd-blocked",
+        title="land blocked",
+        labels=("flow", "reviewing", "reviewed", "blocked", "land-blocked"),
+    )
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda root: type("Config", (), {"limits": type("Limits", (), {"max_parallel_workers": 3})()})(),
+    )
+
+    result = runner.invoke(cli.app, ["status"])
+
+    assert result.exit_code == 0
+    assert "Reviewing" in result.stdout
+    assert "Ready to land" in result.stdout
+    assert cli._reviewing_items(list(beads.items.values())) == [beads.items["bd-review"]]
+    assert cli._ready_to_land_items(list(beads.items.values())) == [beads.items["bd-land"]]
 
 
 def test_status_renders_supervisor_activity_and_worker_latest_message(monkeypatch, tmp_path: Path) -> None:

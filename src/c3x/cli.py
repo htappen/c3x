@@ -864,7 +864,8 @@ def _build_status_table(root: Path) -> Table:
     inbox_items = _with_labels(open_items, {"flow", "inbox", "idea"})
     question_items = _with_labels(open_items, {"flow", "question"})
     running_items = _live_worker_records(root)
-    reviewing_items = _with_labels(open_items, {"flow", "reviewing"})
+    reviewing_items = _reviewing_items(open_items)
+    ready_to_land_items = _ready_to_land_items(open_items)
     blocked_items = _with_labels(open_items, {"flow", "blocked"})
 
     table = Table(title="c3x status")
@@ -876,9 +877,26 @@ def _build_status_table(root: Path) -> Table:
     table.add_row("Ready", str(len(ready_items)))
     table.add_row("Running", str(len(running_items)))
     table.add_row("Reviewing", str(len(reviewing_items)))
+    table.add_row("Ready to land", str(len(ready_to_land_items)))
     table.add_row("Blocked", str(len(blocked_items)))
     table.add_row("Max parallel workers", str(config.limits.max_parallel_workers))
     return table
+
+
+def _reviewing_items(items: list[BeadSummary]) -> list[BeadSummary]:
+    return [
+        item
+        for item in _with_labels(items, {"flow", "reviewing"})
+        if not {"reviewed", "landed", "blocked", "land-blocked"}.intersection(item.labels)
+    ]
+
+
+def _ready_to_land_items(items: list[BeadSummary]) -> list[BeadSummary]:
+    return [
+        item
+        for item in _with_labels(items, {"flow", "reviewing", "reviewed"})
+        if not {"landed", "blocked", "land-blocked"}.intersection(item.labels)
+    ]
 
 
 def _write_activity(root: Path, supervisor: str) -> None:
