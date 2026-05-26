@@ -704,6 +704,42 @@ def test_import_uses_result_path_reported_in_last_message(monkeypatch, tmp_path:
     assert ("bd-1", ["flow", "reviewing", "completed-by-agent"]) in beads.added_labels
 
 
+def test_import_ignores_archived_running_records(monkeypatch, tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", labels=("flow", "reviewing", "reviewed"))
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    archived_dir = tmp_path / ".flow" / "runs" / "bd-1-attempt-1"
+    run_dir.mkdir(parents=True)
+    archived_dir.mkdir(parents=True)
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix-attempt-2",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-2"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="reviewed",
+        attempt=2,
+    ).save(run_dir / "run.json")
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"),
+        prompt=str(archived_dir / "prompt.md"),
+        result=str(archived_dir / "result.json"),
+        last_message=str(archived_dir / "last-message.md"),
+        pid=12345,
+        attempt=1,
+    ).save(archived_dir / "run.json")
+    monkeypatch.setattr(cli, "_process_is_running", lambda pid: False)
+
+    cli._import_finished_results(tmp_path, beads)
+
+    saved = RunRecord.load(run_dir / "run.json")
+    assert saved.status == "reviewed"
+    assert not beads.added_labels
+
+
 def test_missing_result_note_summarizes_logs_without_embedding_them(monkeypatch, tmp_path: Path) -> None:
     beads = _RecordingBeads()
     beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", labels=("flow", "running"))
@@ -1490,6 +1526,53 @@ def test_cleanup_repairs_archived_run_metadata(monkeypatch, tmp_path: Path) -> N
     assert saved.prompt == str(archived_dir / "prompt.md")
     assert saved.last_message == str(archived_dir / "last-message.md")
     assert saved.result == str(actual_result)
+    assert saved.worktree == str(actual_worktree)
+
+
+def test_cleanup_repairs_run_attempt_and_branch_from_actual_worktree(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    actual_worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-3"
+    actual_result = actual_worktree / ".c3x" / "result.json"
+    actual_result.parent.mkdir(parents=True)
+    actual_result.write_text(
+        WorkerResult(task_id="bd-1", status="completed", summary="Done").model_dump_json(),
+        encoding="utf-8",
+    )
+    last_message = run_dir / "last-message.md"
+    last_message.parent.mkdir(parents=True)
+    last_message.write_text(f"Result written to [`.c3x/result.json`]({actual_result}).\n", encoding="utf-8")
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix-attempt-2",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-2"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(
+            tmp_path
+            / ".flow"
+            / "worktrees"
+            / "c3x-bd-1-fix-attempt-2"
+            / ".c3x"
+            / "result.json"
+        ),
+        last_message=str(last_message),
+        status="reviewed",
+        attempt=2,
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "current_branch", lambda worktree: "c3x/bd-1-fix-attempt-3")
+
+    result = runner.invoke(cli.app, ["cleanup", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "current run metadata" in result.stdout
+
+    result = runner.invoke(cli.app, ["cleanup"])
+
+    assert result.exit_code == 0
+    saved = RunRecord.load(run_dir / "run.json")
+    assert saved.attempt == 3
+    assert saved.branch == "c3x/bd-1-fix-attempt-3"
     assert saved.worktree == str(actual_worktree)
 
 

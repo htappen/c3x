@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -283,8 +284,27 @@ def _next_attempt(root: Path, task_id: str) -> int:
         except Exception:
             continue
         if record.task_id == task_id:
-            attempts = max(attempts, record.attempt)
+            attempts = max(attempts, _record_attempt(record))
+    for path in worktrees_dir(root).glob(f"*{task_id}*"):
+        attempts = max(attempts, _attempt_from_text(path.name) or 1)
     return attempts + 1
+
+
+def _record_attempt(record: RunRecord) -> int:
+    candidates = [
+        record.attempt,
+        _attempt_from_text(record.branch),
+        _attempt_from_text(record.worktree),
+        _attempt_from_text(record.result),
+    ]
+    return max(candidate or 1 for candidate in candidates)
+
+
+def _attempt_from_text(text: str) -> int | None:
+    matches = re.findall(r"(?:^|[-/])attempt-(\d+)(?:$|[-/.])", text)
+    if not matches:
+        return None
+    return max(int(match) for match in matches)
 
 
 def _attempt_branch(task_id: str, title: str, attempt: int) -> str:

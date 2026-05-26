@@ -2,6 +2,7 @@ from pathlib import Path
 
 from c3x import agent
 from c3x.agent import _agent_command
+from c3x.agent import _next_attempt
 from c3x.agent import start_worker
 from c3x.agent import _worker_prompt
 from c3x.schema import RunRecord
@@ -151,6 +152,29 @@ def test_start_worker_launches_in_new_process_session(monkeypatch, tmp_path: Pat
 
     assert record.pid == 12345
     assert popen_kwargs["start_new_session"] is True
+
+
+def test_next_attempt_uses_record_and_worktree_suffixes(tmp_path: Path) -> None:
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix-attempt-2",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-4"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(
+            tmp_path
+            / ".flow"
+            / "worktrees"
+            / "c3x-bd-1-fix-attempt-4"
+            / ".c3x"
+            / "result.json"
+        ),
+        last_message=str(run_dir / "last-message.md"),
+        attempt=2,
+    ).save(run_dir / "run.json")
+    (tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-5").mkdir(parents=True)
+
+    assert _next_attempt(tmp_path, "bd-1") == 6
 
 
 def test_agent_command_substitutes_runtime_paths_antigravity(tmp_path: Path) -> None:

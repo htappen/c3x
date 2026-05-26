@@ -510,7 +510,7 @@ def review(
         beads.add_note(task_id, f"c3x review passed: {result.summary}")
         beads.add_labels(task_id, ["reviewed", "reviewing"])
         beads.remove_labels(task_id, ["running", "blocked"])
-        record = RunRecord.load(run_record_path(root, task_id))
+        record = _load_repaired_current_run_record(root, task_id)
         record.status = "reviewed"
         record.outcome = "reviewed"
         record.save(run_record_path(root, task_id))
@@ -531,7 +531,7 @@ def land(
     root = _root()
     _warn_if_risky_flow_branch(root)
     try:
-        record = RunRecord.load(run_record_path(root, task_id))
+        record = _load_repaired_current_run_record(root, task_id)
         if record.status != "reviewed":
             raise ValueError(f"{task_id} is not reviewed")
         beads = _beads(root)
@@ -1247,7 +1247,16 @@ def _current_run_record(root: Path, task_id: str) -> RunRecord | None:
     path = run_record_path(root, task_id)
     if not path.exists():
         return None
-    return RunRecord.load(path)
+    return _load_repaired_current_run_record(root, task_id)
+
+
+def _load_repaired_current_run_record(root: Path, task_id: str) -> RunRecord:
+    path = run_record_path(root, task_id)
+    record = RunRecord.load(path)
+    repaired = _repaired_run_record(path, record)
+    if repaired != record:
+        repaired.save(path)
+    return repaired
 
 
 def _session_id_for_run(record: RunRecord | None) -> str | None:
@@ -1349,7 +1358,7 @@ def _repair_archived_run_record_paths(record_path: Path) -> None:
 
 def _repaired_run_record(record_path: Path, record: RunRecord) -> RunRecord:
     run_dir = record_path.parent
-    updates: dict[str, str] = {}
+    updates: dict[str, object] = {}
     for field_name in ("prompt", "last_message"):
         path = Path(getattr(record, field_name))
         archived_path = run_dir / path.name
@@ -1363,7 +1372,42 @@ def _repaired_run_record(record_path: Path, record: RunRecord) -> RunRecord:
         if worktree is not None:
             updates["worktree"] = str(worktree)
 
+    repaired_worktree = Path(str(updates.get("worktree", record.worktree)))
+    repaired_branch = _branch_for_worktree(repaired_worktree)
+    if repaired_branch and repaired_branch != record.branch:
+        updates["branch"] = repaired_branch
+
+    repaired_attempt = _record_attempt(record.model_copy(update=updates))
+    if repaired_attempt != record.attempt:
+        updates["attempt"] = repaired_attempt
+
     return record.model_copy(update=updates) if updates else record
+
+
+def _branch_for_worktree(worktree: Path) -> str | None:
+    if not worktree.exists():
+        return None
+    try:
+        return current_branch(worktree)
+    except GitError:
+        return None
+
+
+def _record_attempt(record: RunRecord) -> int:
+    candidates = [
+        record.attempt,
+        _attempt_from_text(record.branch),
+        _attempt_from_text(record.worktree),
+        _attempt_from_text(record.result),
+    ]
+    return max(candidate or 1 for candidate in candidates)
+
+
+def _attempt_from_text(text: str) -> int | None:
+    matches = re.findall(r"(?:^|[-/])attempt-(\d+)(?:$|[-/.])", text)
+    if not matches:
+        return None
+    return max(int(match) for match in matches)
 
 
 def _reported_result_path(last_message_path: Path) -> Path | None:
@@ -1487,6 +1531,22 @@ def _cleanup_actions(root: Path, *, task_id: str | None, require_task_cleanup: b
         if task_id and record.task_id != task_id:
             continue
         run_dir = path.parent
+        if _run_record_needs_repair(path, record):
+            actions.append(
+                CleanupAction(
+                    task_id=record.task_id,
+                    run_dir=run_dir,
+                    worktree=Path(record.worktree),
+                    branch=record.branch,
+                    reason=(
+                        "current run metadata"
+                        if path == run_record_path(root, record.task_id)
+                        else "archived run metadata"
+                    ),
+                    repair_run_record=True,
+                )
+            )
+            continue
         if path == run_record_path(root, record.task_id):
             if record.status == "landed":
                 try:
@@ -1517,18 +1577,6 @@ def _cleanup_actions(root: Path, *, task_id: str | None, require_task_cleanup: b
                     )
                 )
             continue
-        if _archived_run_record_needs_repair(path, record):
-            actions.append(
-                CleanupAction(
-                    task_id=record.task_id,
-                    run_dir=run_dir,
-                    worktree=Path(record.worktree),
-                    branch=record.branch,
-                    reason="archived run metadata",
-                    repair_run_record=True,
-                )
-            )
-            continue
         current = canonical.get(record.task_id)
         if _is_superseded_attempt(record, current):
             actions.append(
@@ -1548,7 +1596,7 @@ def _cleanup_actions(root: Path, *, task_id: str | None, require_task_cleanup: b
     return actions
 
 
-def _archived_run_record_needs_repair(path: Path, record: RunRecord) -> bool:
+def _run_record_needs_repair(path: Path, record: RunRecord) -> bool:
     return _repaired_run_record(path, record) != record
 
 
@@ -1733,6 +1781,10 @@ def _completed_result_evidence(root: Path, task_id: str) -> tuple[RunRecord, Wor
         worktree = _worktree_from_result_path(result_path_for_record)
         if worktree is not None:
             repaired = repaired.model_copy(update={"worktree": str(worktree)})
+            branch = _branch_for_worktree(worktree)
+            if branch:
+                repaired = repaired.model_copy(update={"branch": branch})
+        repaired = repaired.model_copy(update={"attempt": _record_attempt(repaired)})
         matches.append((record_path.stat().st_mtime, repaired, result))
     if not matches:
         return None
@@ -1919,7 +1971,7 @@ def _print_unstick_candidates(candidates: list[UnstickCandidate], *, fix: bool) 
 
 
 def _apply_unstick_candidate(root: Path, beads: Beads, candidate: UnstickCandidate) -> None:
-    record = RunRecord.load(run_record_path(root, candidate.task_id))
+    record = _load_repaired_current_run_record(root, candidate.task_id)
     item = beads.show(candidate.task_id)
     if candidate.action == "mark-completed-from-result":
         evidence = _completed_result_evidence(root, candidate.task_id)
@@ -2120,7 +2172,7 @@ def _auto_review(root: Path, beads: Beads) -> None:
             _review_result(result)
             beads.add_note(item.id, f"c3x auto-review passed: {result.summary}")
             beads.add_labels(item.id, ["reviewed"])
-            record = RunRecord.load(run_record_path(root, item.id))
+            record = _load_repaired_current_run_record(root, item.id)
             record.status = "reviewed"
             record.outcome = "reviewed"
             record.save(run_record_path(root, item.id))
@@ -2135,7 +2187,7 @@ def _auto_review(root: Path, beads: Beads) -> None:
 def _auto_land(root: Path, beads: Beads, *, cleanup_done: bool) -> None:
     for item in _with_labels(beads.list_active(), {"flow", "reviewing", "reviewed"}):
         try:
-            record = RunRecord.load(run_record_path(root, item.id))
+            record = _load_repaired_current_run_record(root, item.id)
             if record.status != "reviewed":
                 continue
             commit_worktree_changes(Path(record.worktree), f"Complete c3x task {item.id}")
@@ -2203,7 +2255,7 @@ def _critic_tick(beads: Beads) -> str:
 
 def _recover_interrupted_workers(root: Path, beads: Beads) -> None:
     config = load_config(root)
-    for record in _run_records(root):
+    for record in _canonical_run_records(root):
         if record.status != "running":
             continue
         if Path(record.result).exists():
@@ -2235,7 +2287,7 @@ def _recover_interrupted_workers(root: Path, beads: Beads) -> None:
 
 
 def _import_finished_results(root: Path, beads: Beads) -> None:
-    for record in _run_records(root):
+    for record in _canonical_run_records(root):
         if record.status != "running":
             continue
         result_file = _result_file_for_record(record)
@@ -2247,6 +2299,10 @@ def _import_finished_results(root: Path, beads: Beads) -> None:
         worktree = _worktree_from_result_path(result_file)
         if worktree is not None:
             record.worktree = str(worktree)
+            branch = _branch_for_worktree(worktree)
+            if branch:
+                record.branch = branch
+        record.attempt = _record_attempt(record)
         result_text = result_file.read_text(encoding="utf-8")
         result = WorkerResult.model_validate_json(result_text)
         if result.task_id != record.task_id:
@@ -2432,7 +2488,7 @@ def _process_is_running(pid: int) -> bool:
 def _live_worker_records(root: Path) -> list[RunRecord]:
     return [
         record
-        for record in _run_records(root)
+        for record in _canonical_run_records(root)
         if record.status == "running"
         and record.pid is not None
         and _process_is_running(record.pid)
@@ -2482,6 +2538,18 @@ def _print_counter(title: str, values: dict) -> None:
 
 def _run_records(root: Path) -> list[RunRecord]:
     return [record for _, record in _run_record_paths(root)]
+
+
+def _canonical_run_records(root: Path) -> list[RunRecord]:
+    return [record for _, record in _canonical_run_record_paths(root)]
+
+
+def _canonical_run_record_paths(root: Path) -> list[tuple[Path, RunRecord]]:
+    return [
+        (path, record)
+        for path, record in _run_record_paths(root)
+        if path == run_record_path(root, record.task_id)
+    ]
 
 
 def _run_record_paths(root: Path) -> list[tuple[Path, RunRecord]]:
