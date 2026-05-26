@@ -807,7 +807,9 @@ def _build_workers_table(root: Path) -> Table:
 
 
 def _build_codex_status_table(root: Path) -> Table:
-    table = Table(title="codex /status")
+    config = load_config(root)
+    provider = getattr(getattr(config, "agents", None), "provider", "codex")
+    table = Table(title=f"{provider} /status")
     table.add_column("Task")
     table.add_column("Latest")
     rows = 0
@@ -838,7 +840,12 @@ def _extract_codex_status(text: str) -> str:
     marker = -1
     for index, line in enumerate(lines):
         normalized = line.lower().strip()
-        if normalized == "/status" or normalized.startswith("codex /status"):
+        if (
+            normalized == "/status"
+            or normalized.startswith("codex /status")
+            or normalized.startswith("antigravity /status")
+            or normalized.startswith("agy /status")
+        ):
             marker = index
     if marker < 0:
         return ""

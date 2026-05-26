@@ -226,20 +226,53 @@ def _agent_command(
     *,
     resume_session_id: str | None = None,
 ) -> list[str]:
-    executable = shlex.split(config.agents.codex_command)
-    if not executable:
-        raise AgentError("agents.codex_command cannot be empty")
-    mapping = {
-        "model": config.models.worker,
-        "worktree": str(worktree),
-        "prompt": str(prompt),
-        "result": str(result),
-        "last_message": str(last_message),
-        "session_id": resume_session_id or "",
-    }
-    template = config.agents.codex_resume_args if resume_session_id else config.agents.codex_args
-    args = [arg.format(**mapping) for arg in template]
-    return [*executable, *args]
+    provider = getattr(config.agents, "provider", "codex")
+    if provider == "antigravity":
+        command_str = config.agents.antigravity_command
+        executable = shlex.split(command_str)
+        if not executable:
+            raise AgentError("agents.antigravity_command cannot be empty")
+        executable[0] = str(Path(executable[0]).expanduser())
+        
+        prompt_content = ""
+        if prompt.exists():
+            prompt_content = prompt.read_text(encoding="utf-8")
+
+        mapping = {
+            "model": config.models.worker,
+            "worktree": str(worktree),
+            "prompt": str(prompt),
+            "prompt_content": prompt_content,
+            "result": str(result),
+            "last_message": str(last_message),
+            "session_id": resume_session_id or "",
+        }
+        template = config.agents.antigravity_resume_args if resume_session_id else config.agents.antigravity_args
+        args = [arg.format(**mapping) for arg in template]
+        return [*executable, *args]
+    else:
+        command_str = config.agents.codex_command
+        executable = shlex.split(command_str)
+        if not executable:
+            raise AgentError("agents.codex_command cannot be empty")
+        executable[0] = str(Path(executable[0]).expanduser())
+        
+        prompt_content = ""
+        if prompt.exists():
+            prompt_content = prompt.read_text(encoding="utf-8")
+
+        mapping = {
+            "model": config.models.worker,
+            "worktree": str(worktree),
+            "prompt": str(prompt),
+            "prompt_content": prompt_content,
+            "result": str(result),
+            "last_message": str(last_message),
+            "session_id": resume_session_id or "",
+        }
+        template = config.agents.codex_resume_args if resume_session_id else config.agents.codex_args
+        args = [arg.format(**mapping) for arg in template]
+        return [*executable, *args]
 
 
 def _next_attempt(root: Path, task_id: str) -> int:
@@ -266,7 +299,7 @@ def _conflict_branch(task_id: str, title: str, attempt: int) -> str:
 
 
 def _worker_prompt(task: BeadSummary, result: Path) -> str:
-    return f"""{caveman_mode_text()}
+    return f"""{_worker_prompt_preamble()}
 
 # c3x worker task
 
@@ -317,7 +350,7 @@ def _resume_worker_prompt(
     previous: RunRecord,
     reason: str,
 ) -> str:
-    return f"""{caveman_mode_text()}
+    return f"""{_worker_prompt_preamble()}
 
 # c3x worker session resume
 
@@ -378,7 +411,7 @@ def _continue_worktree_prompt(
     previous: RunRecord,
     reason: str,
 ) -> str:
-    return f"""{caveman_mode_text()}
+    return f"""{_worker_prompt_preamble()}
 
 # c3x worker worktree continuation
 
@@ -444,7 +477,7 @@ def _conflict_resolver_prompt(
     original_result: str,
 ) -> str:
     files = "\n".join(f"- {path}" for path in conflicted_files) or "- No currently unmerged files"
-    return f"""{caveman_mode_text()}
+    return f"""{_worker_prompt_preamble()}
 
 # c3x merge conflict resolver
 
@@ -503,4 +536,15 @@ Required result shape:
 
 If the conflict cannot be resolved safely, set `status` to `blocked`, use
 `blocker_category` `merge-conflict`, and describe the exact unresolved files.
+"""
+
+
+def _worker_prompt_preamble() -> str:
+    return f"""/status
+
+{caveman_mode_text()}
+
+Before task work, preserve the `/status` output in the worker log/transcript.
+If this Codex mode does not execute slash commands from prompts, continue normally
+after this status probe.
 """

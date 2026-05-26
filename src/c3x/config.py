@@ -11,6 +11,7 @@ CONFIG_PATH = Path(FLOW_DIR) / "config.yml"
 
 
 class AgentConfig(BaseModel):
+    provider: str = "codex"
     codex_command: str = "codex"
     codex_args: list[str] = Field(
         default_factory=lambda: [
@@ -35,6 +36,29 @@ class AgentConfig(BaseModel):
             "{last_message}",
             "{session_id}",
             "{prompt}",
+        ]
+    )
+    antigravity_command: str = "~/.local/bin/agy.va39"
+    antigravity_args: list[str] = Field(
+        default_factory=lambda: [
+            "--dangerously-skip-permissions",
+            "--sandbox",
+            "--add-dir",
+            "{worktree}",
+            "--print",
+            "{prompt_content}",
+        ]
+    )
+    antigravity_resume_args: list[str] = Field(
+        default_factory=lambda: [
+            "--dangerously-skip-permissions",
+            "--sandbox",
+            "--add-dir",
+            "{worktree}",
+            "--conversation",
+            "{session_id}",
+            "--print",
+            "{prompt_content}",
         ]
     )
 

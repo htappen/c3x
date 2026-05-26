@@ -13,6 +13,10 @@ def test_write_default_config_creates_flow_config(tmp_path: Path) -> None:
 def test_load_config_uses_defaults_when_missing(tmp_path: Path) -> None:
     config = load_config(tmp_path)
 
+    assert config.agents.provider == "codex"
     assert config.agents.codex_command == "codex"
     assert "resume" in config.agents.codex_resume_args
+    assert config.agents.antigravity_command == "~/.local/bin/agy.va39"
+    assert "--print" in config.agents.antigravity_args
+    assert "--conversation" in config.agents.antigravity_resume_args
     assert config.limits.max_parallel_workers == 3

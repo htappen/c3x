@@ -378,6 +378,54 @@ def test_status_renders_captured_codex_status(monkeypatch, tmp_path: Path) -> No
     assert "Model: gpt-5.4-mini Context: 12k / 50k" in result.stdout
 
 
+def test_status_renders_captured_antigravity_status(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _StatusBeads()
+    run_dir = tmp_path / ".flow" / "runs" / "bd-3"
+    last_message = run_dir / "last-message.md"
+    last_message.parent.mkdir(parents=True)
+    last_message.write_text(
+        "antigravity /status\n"
+        "Model: gpt-5.4-mini\n"
+        "Context: 12k / 50k\n"
+        "\n"
+        "working hard",
+        encoding="utf-8",
+    )
+    RunRecord(
+        task_id="bd-3",
+        branch="c3x/bd-3-running",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-3-running"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(last_message),
+        pid=1234,
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "_process_is_running", lambda pid: pid == 1234)
+    
+    class MockLimits:
+        max_parallel_workers = 3
+    class MockAgents:
+        provider = "antigravity"
+    class MockConfig:
+        limits = MockLimits()
+        agents = MockAgents()
+
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda root: MockConfig(),
+    )
+
+    result = runner.invoke(cli.app, ["status"])
+
+    assert result.exit_code == 0
+    assert "antigravity /status" in result.stdout
+    assert "Model: gpt-5.4-mini Context: 12k / 50k" in result.stdout
+
+
 def test_status_live_uses_alternate_screen() -> None:
     live = cli._status_live(cli._build_activity_table(Path("/tmp")))
 
