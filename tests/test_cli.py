@@ -800,6 +800,46 @@ def test_land_repairs_current_record_from_archived_completed_result(monkeypatch,
     assert saved.branch == "c3x/bd-1-fix-attempt-3"
 
 
+def test_review_does_not_use_older_archived_result_for_newer_attempt(tmp_path: Path) -> None:
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    current_worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-conflict-attempt-5"
+    archived_worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-3"
+    archived_result = archived_worktree / ".c3x" / "result.json"
+    archived_result.parent.mkdir(parents=True)
+    archived_result.write_text(
+        WorkerResult(task_id="bd-1", status="completed", summary="Old result").model_dump_json(),
+        encoding="utf-8",
+    )
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix-conflict-attempt-5",
+        worktree=str(current_worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(current_worktree / ".c3x" / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="running",
+        attempt=5,
+    ).save(run_dir / "run.json")
+    archived_dir = tmp_path / ".flow" / "runs" / "bd-1-attempt-3"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix-attempt-3",
+        worktree=str(archived_worktree),
+        prompt=str(archived_dir / "prompt.md"),
+        result=str(archived_result),
+        last_message=str(archived_dir / "last-message.md"),
+        status="completed",
+        attempt=3,
+    ).save(archived_dir / "run.json")
+
+    try:
+        cli._load_worker_result(tmp_path, "bd-1")
+    except ValueError as exc:
+        assert "missing worker result" in str(exc)
+    else:
+        raise AssertionError("expected missing worker result")
+
+
 def test_missing_result_note_summarizes_logs_without_embedding_them(monkeypatch, tmp_path: Path) -> None:
     beads = _RecordingBeads()
     beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", labels=("flow", "running"))

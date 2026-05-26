@@ -2528,15 +2528,18 @@ def _live_worker_records(root: Path) -> list[RunRecord]:
 
 def _load_worker_result(root: Path, task_id: str) -> WorkerResult:
     path = result_path(root, task_id)
+    current_attempt = 1
     if not path.exists():
         record_path = run_record_path(root, task_id)
         if record_path.exists():
             record = _load_repaired_current_run_record(root, task_id)
+            current_attempt = _record_attempt(record)
             path = _result_file_for_record(record)
     if not path.exists():
         completed_evidence = _completed_result_evidence(root, task_id)
-        if completed_evidence is not None:
-            _, result = completed_evidence
+        if completed_evidence is not None and _record_attempt(completed_evidence[0]) >= current_attempt:
+            evidence_record, result = completed_evidence
+            _save_canonical_result(root, task_id, Path(evidence_record.result).read_text(encoding="utf-8"))
             return result
     if not path.exists():
         raise ValueError(f"missing worker result: {path}")
