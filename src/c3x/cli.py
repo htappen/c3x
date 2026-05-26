@@ -1198,11 +1198,9 @@ def _is_transient_worker_failure(record: RunRecord) -> bool:
             _read_tail(Path(record.last_message), max_chars=4000),
         ]
     ).lower()
-    return any(
+    return _has_usage_limit_evidence(evidence) or any(
         pattern in evidence
         for pattern in (
-            "you've hit your usage limit",
-            "usage limit",
             "rate limit",
             "429",
             "failed to connect",
@@ -2117,7 +2115,7 @@ def _missing_result_summary(record: RunRecord, *, last_message_path: Path, stder
     last_message = _read_tail(last_message_path, max_chars=2000)
     stderr = _read_tail(stderr_path, max_chars=12000)
     combined = f"{last_message}\n{stderr}".lower()
-    if "you've hit your usage limit" in combined or "usage limit" in combined:
+    if _has_usage_limit_evidence(combined):
         return "Codex usage limit stopped the worker before c3x found result.json."
     if "rate limit" in combined or "429" in combined:
         return "Codex rate limit stopped the worker before c3x found result.json."
@@ -2148,6 +2146,10 @@ def _read_tail(path: Path, *, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text.strip()
     return text[-max_chars:].strip()
+
+
+def _has_usage_limit_evidence(text: str) -> bool:
+    return "usage limit" in text.lower()
 
 
 def _process_is_running(pid: int) -> bool:
@@ -2243,7 +2245,7 @@ def _blocked_reason(item: BeadSummary) -> str:
 def _blocked_note_reason(notes: str) -> str:
     lines = [line.strip() for line in notes.splitlines() if line.strip()]
     lowered = notes.lower()
-    if "you've hit your usage limit" in lowered:
+    if _has_usage_limit_evidence(notes):
         return "Codex usage limit; worker exited without result.json"
     if "worker exited without writing result.json" in lowered:
         return "Worker exited without writing result.json"

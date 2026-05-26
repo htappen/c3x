@@ -411,6 +411,14 @@ def test_blocked_lists_flow_blocked_items_with_reason(monkeypatch, tmp_path: Pat
     assert "bd-2" not in result.stdout
 
 
+def test_blocked_note_reason_detects_usage_limit_by_simple_grep() -> None:
+    reason = cli._blocked_note_reason(
+        "ERROR: Usage limit reached. Visit https://chatgpt.com/codex/settings/usage for credits."
+    )
+
+    assert reason == "Codex usage limit; worker exited without result.json"
+
+
 def test_blocked_reports_empty_state(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _RecordingBeads()
@@ -541,6 +549,31 @@ def test_missing_result_note_summarizes_logs_without_embedding_them(monkeypatch,
     assert "stderr_path:" in note
     assert "very long stderr line\nvery long stderr line" not in note
     assert len(note) < 1000
+
+
+def test_missing_result_summary_detects_usage_limit_in_stderr(tmp_path: Path) -> None:
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    run_dir.mkdir(parents=True)
+    last_message = run_dir / "last-message.md"
+    stderr = run_dir / "stderr.log"
+    stderr.write_text(
+        "ERROR: You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), "
+        "visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 6:27 PM.\n",
+        encoding="utf-8",
+    )
+    record = RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(last_message),
+        pid=12345,
+    )
+
+    summary = cli._missing_result_summary(record, last_message_path=last_message, stderr_path=stderr)
+
+    assert summary == "Codex usage limit stopped the worker before c3x found result.json."
 
 
 def test_missing_result_beads_write_failure_does_not_abort_import(monkeypatch, tmp_path: Path) -> None:
