@@ -61,6 +61,7 @@ class CleanupAction:
     reason: str
     remove_run_dir: bool = False
     repair_merge: bool = False
+    repair_run_record: bool = False
 
 
 @dataclass(frozen=True)
@@ -587,13 +588,17 @@ def cleanup(
             return
         for action in actions:
             if dry_run:
-                console.print(f"[yellow]Would clean[/yellow] {action.reason}: {action.task_id}")
+                verb = "repair" if action.repair_run_record else "clean"
+                target = f"{action.task_id} ({action.run_dir.name})" if action.repair_run_record else action.task_id
+                console.print(f"[yellow]Would {verb}[/yellow] {action.reason}: {target}")
                 continue
             if action.repair_merge and not _confirm_repair_merge(root, action):
                 console.print(f"[yellow]Skipped[/yellow] {action.task_id}")
                 continue
             _run_cleanup_action(root, action, force=force)
-            console.print(f"[green]Cleaned[/green] {action.reason}: {action.task_id}")
+            verb = "Repaired" if action.repair_run_record else "Cleaned"
+            target = f"{action.task_id} ({action.run_dir.name})" if action.repair_run_record else action.task_id
+            console.print(f"[green]{verb}[/green] {action.reason}: {target}")
     except (BeadsError, GitError, ValueError) as exc:
         raise typer.Exit(_error(str(exc))) from exc
 
@@ -1319,6 +1324,7 @@ def _archive_current_run(root: Path, task_id: str) -> None:
         suffix = "previous"
     target = _unique_archive_path(run_dir.with_name(f"{task_id}-{suffix}"))
     run_dir.rename(target)
+    _repair_archived_run_record_paths(target / "run.json")
 
 
 def _unique_archive_path(path: Path) -> Path:
@@ -1330,6 +1336,56 @@ def _unique_archive_path(path: Path) -> Path:
         if not candidate.exists():
             return candidate
         index += 1
+
+
+def _repair_archived_run_record_paths(record_path: Path) -> None:
+    if not record_path.exists():
+        return
+    record = RunRecord.load(record_path)
+    repaired = _repaired_run_record(record_path, record)
+    if repaired != record:
+        repaired.save(record_path)
+
+
+def _repaired_run_record(record_path: Path, record: RunRecord) -> RunRecord:
+    run_dir = record_path.parent
+    updates: dict[str, str] = {}
+    for field_name in ("prompt", "last_message"):
+        path = Path(getattr(record, field_name))
+        archived_path = run_dir / path.name
+        if path.parent != run_dir and archived_path.exists():
+            updates[field_name] = str(archived_path)
+
+    reported_result = _reported_result_path(run_dir / Path(updates.get("last_message", record.last_message)).name)
+    if reported_result and reported_result.exists() and Path(record.result) != reported_result:
+        updates["result"] = str(reported_result)
+        worktree = _worktree_from_result_path(reported_result)
+        if worktree is not None:
+            updates["worktree"] = str(worktree)
+
+    return record.model_copy(update=updates) if updates else record
+
+
+def _reported_result_path(last_message_path: Path) -> Path | None:
+    text = _read_tail(last_message_path, max_chars=12000)
+    if not text:
+        return None
+    patterns = (
+        r"Result written to \[`\.c3x/result\.json`\]\(([^)]+)\)",
+        r"Wrote \[`\.c3x/result\.json`\]\(([^)]+)\)",
+        r"session result saved at\s+(\S+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return Path(match.group(1)).expanduser()
+    return None
+
+
+def _worktree_from_result_path(path: Path) -> Path | None:
+    if path.name == "result.json" and path.parent.name == ".c3x":
+        return path.parent.parent
+    return None
 
 
 def _retry_removed_labels(task: BeadSummary) -> list[str]:
@@ -1461,6 +1517,18 @@ def _cleanup_actions(root: Path, *, task_id: str | None, require_task_cleanup: b
                     )
                 )
             continue
+        if _archived_run_record_needs_repair(path, record):
+            actions.append(
+                CleanupAction(
+                    task_id=record.task_id,
+                    run_dir=run_dir,
+                    worktree=Path(record.worktree),
+                    branch=record.branch,
+                    reason="archived run metadata",
+                    repair_run_record=True,
+                )
+            )
+            continue
         current = canonical.get(record.task_id)
         if _is_superseded_attempt(record, current):
             actions.append(
@@ -1478,6 +1546,10 @@ def _cleanup_actions(root: Path, *, task_id: str | None, require_task_cleanup: b
         if current and current.status != "landed":
             raise ValueError(f"{task_id} is not landed and has no superseded attempts")
     return actions
+
+
+def _archived_run_record_needs_repair(path: Path, record: RunRecord) -> bool:
+    return _repaired_run_record(path, record) != record
 
 
 def _repair_large_beads_payloads(root: Path, beads: Beads, *, task_id: str | None, dry_run: bool) -> None:
@@ -1926,6 +1998,9 @@ def _stat_ppid(stat: str) -> int | None:
 
 
 def _run_cleanup_action(root: Path, action: CleanupAction, *, force: bool) -> None:
+    if action.repair_run_record:
+        _repair_archived_run_record_paths(action.run_dir / "run.json")
+        return
     if action.repair_merge:
         commit_worktree_changes(action.worktree, f"Complete c3x task {action.task_id}")
         merge_branch(root, action.branch)
@@ -2069,11 +2144,15 @@ def _import_finished_results(root: Path, beads: Beads) -> None:
     for record in _run_records(root):
         if record.status != "running":
             continue
-        result_file = Path(record.result)
+        result_file = _result_file_for_record(record)
         if not result_file.exists():
             if record.pid is not None and not _process_is_running(record.pid):
                 _block_missing_worker_result(root, beads, record)
             continue
+        record.result = str(result_file)
+        worktree = _worktree_from_result_path(result_file)
+        if worktree is not None:
+            record.worktree = str(worktree)
         result_text = result_file.read_text(encoding="utf-8")
         result = WorkerResult.model_validate_json(result_text)
         if result.task_id != record.task_id:
@@ -2122,6 +2201,16 @@ def _import_finished_results(root: Path, beads: Beads) -> None:
             record.outcome = result.status
         record.finished_at = _now()
         record.save(run_record_path(root, record.task_id))
+
+
+def _result_file_for_record(record: RunRecord) -> Path:
+    expected = Path(record.result)
+    if expected.exists():
+        return expected
+    reported = _reported_result_path(Path(record.last_message))
+    if reported and reported.exists():
+        return reported
+    return expected
 
 
 def _save_canonical_result(root: Path, task_id: str, result_text: str) -> None:
@@ -2262,7 +2351,7 @@ def _load_worker_result(root: Path, task_id: str) -> WorkerResult:
         record_path = run_record_path(root, task_id)
         if record_path.exists():
             record = RunRecord.load(record_path)
-            path = Path(record.result)
+            path = _result_file_for_record(record)
     if not path.exists():
         raise ValueError(f"missing worker result: {path}")
     return WorkerResult.model_validate_json(path.read_text(encoding="utf-8"))
