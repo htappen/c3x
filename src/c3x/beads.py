@@ -110,14 +110,39 @@ class Beads:
     def close(self, task_id: str, reason: str) -> None:
         self._run(["close", task_id, "--reason", reason], expect_json=False)
 
-    def compact_issue(self, task_id: str, summary: str) -> None:
+    def compact_issue(self, task_id: str, summary: str, *, issue: BeadSummary | None = None) -> None:
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md", delete=True) as summary_file:
             summary_file.write(summary)
             summary_file.flush()
-            self._run(
-                ["admin", "compact", "--apply", "--id", task_id, "--summary", summary_file.name, "--force"],
-                expect_json=False,
-            )
+            try:
+                self._run(
+                    ["admin", "compact", "--apply", "--id", task_id, "--summary", summary_file.name, "--force"],
+                    expect_json=False,
+                )
+                return
+            except BeadsError as exc:
+                if "not yet supported in embedded mode" not in str(exc):
+                    raise
+        self._import_compacted_issue(task_id, summary, issue=issue)
+
+    def _import_compacted_issue(self, task_id: str, summary: str, *, issue: BeadSummary | None) -> None:
+        issue = issue or self.show(task_id)
+        payload = {
+            "id": task_id,
+            "title": issue.title,
+            "description": summary,
+            "notes": "c3x compacted oversized notes into the issue description summary.",
+            "status": issue.status or "open",
+            "issue_type": issue.type or "task",
+            "priority": issue.priority if issue.priority is not None else 2,
+            "labels": list(issue.labels),
+        }
+        if issue.acceptance:
+            payload["acceptance_criteria"] = issue.acceptance
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".jsonl", delete=True) as import_file:
+            import_file.write(json.dumps(payload) + "\n")
+            import_file.flush()
+            self._run(["import", import_file.name], expect_json=False)
 
     def create_task(
         self,
@@ -181,10 +206,10 @@ def _summaries(payload: Any) -> list[BeadSummary]:
                 title=str(item.get("title") or ""),
                 status=_optional_str(item.get("status")),
                 priority=_optional_int(item.get("priority")),
-                type=_optional_str(item.get("type")),
+                type=_optional_str(item.get("type") or item.get("issue_type")),
                 description=_optional_str(item.get("description")),
                 notes=_optional_str(item.get("notes")),
-                acceptance=_optional_str(item.get("acceptance")),
+                acceptance=_optional_str(item.get("acceptance") or item.get("acceptance_criteria")),
                 labels=tuple(str(label) for label in labels),
             )
         )

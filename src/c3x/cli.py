@@ -1410,7 +1410,7 @@ def _repair_large_beads_payloads(root: Path, beads: Beads, *, task_id: str | Non
         if dry_run:
             console.print(f"[yellow]Would repair Beads payload[/yellow] {item.id}: {size} bytes")
             continue
-        beads.compact_issue(item.id, _large_bead_compaction_summary(item, size))
+        beads.compact_issue(item.id, _large_bead_compaction_summary(item, size), issue=item)
         console.print(f"[green]Repaired Beads payload[/green] {item.id}: {size} bytes")
 
 

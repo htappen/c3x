@@ -128,7 +128,7 @@ class _RecordingBeads:
         self.closed.append((task_id, note))
         self.items.pop(task_id, None)
 
-    def compact_issue(self, task_id: str, summary: str) -> None:
+    def compact_issue(self, task_id: str, summary: str, *, issue: BeadSummary | None = None) -> None:
         self.compacted.append((task_id, summary))
         item = self.items[task_id]
         self.items[task_id] = replace(item, description=summary, notes="")
