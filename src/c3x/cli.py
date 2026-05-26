@@ -218,6 +218,17 @@ def questions() -> None:
 
 
 @app.command()
+def blocked() -> None:
+    """Show c3x flow tasks marked blocked, with the likely blocker reason."""
+    root = _root()
+    try:
+        items = _with_labels(_beads(root).list_active(), {"flow", "blocked"})
+    except BeadsError as exc:
+        raise typer.Exit(_error(str(exc))) from exc
+    _print_blocked_items(items)
+
+
+@app.command()
 def clarify() -> None:
     """Answer outstanding human clarification questions in a terminal chat loop."""
     root = _root()
@@ -677,6 +688,27 @@ def _print_items(title: str, items: list[BeadSummary]) -> None:
             item.id,
             "" if item.priority is None else str(item.priority),
             item.status or "",
+            item.title,
+        )
+    console.print(table)
+
+
+def _print_blocked_items(items: list[BeadSummary]) -> None:
+    if not items:
+        console.print("[green]No blocked c3x flow tasks.[/green]")
+        return
+    table = Table(title="Blocked")
+    table.add_column("ID", no_wrap=True)
+    table.add_column("P", justify="right")
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Reason", ratio=2)
+    table.add_column("Title")
+    for item in items:
+        table.add_row(
+            item.id,
+            "" if item.priority is None else str(item.priority),
+            item.status or "",
+            _blocked_reason(item),
             item.title,
         )
     console.print(table)
@@ -1857,6 +1889,42 @@ def _run_record_paths(root: Path) -> list[tuple[Path, RunRecord]]:
 
 def _with_labels(items: list[BeadSummary], labels: set[str]) -> list[BeadSummary]:
     return [item for item in items if labels.issubset(set(item.labels))]
+
+
+def _blocked_reason(item: BeadSummary) -> str:
+    categories = [
+        label.removeprefix("blocker-").replace("_", " ").replace("-", " ")
+        for label in sorted(item.labels)
+        if label.startswith("blocker-")
+    ]
+    note_reason = _blocked_note_reason(item.notes or "")
+    if categories and note_reason:
+        return f"{', '.join(categories)}: {note_reason}"
+    if categories:
+        return ", ".join(categories)
+    return note_reason or "blocked label present"
+
+
+def _blocked_note_reason(notes: str) -> str:
+    lines = [line.strip() for line in notes.splitlines() if line.strip()]
+    lowered = notes.lower()
+    if "you've hit your usage limit" in lowered:
+        return "Codex usage limit; worker exited without result.json"
+    if "worker exited without writing result.json" in lowered:
+        return "Worker exited without writing result.json"
+    for line in reversed(lines):
+        line_lower = line.lower()
+        if line_lower.startswith(("worker blocked:", "worker failed:")):
+            return line
+        if line_lower.startswith("c3x auto-review blocked:"):
+            return line.removeprefix("c3x auto-review blocked:").strip()
+        if line_lower.startswith("c3x auto-land blocked:"):
+            return line.removeprefix("c3x auto-land blocked:").strip()
+        if "c3x land blocked by merge conflict" in line_lower:
+            return line
+        if "could not restart interrupted worker" in line_lower:
+            return line
+    return ""
 
 
 def _warn_if_risky_flow_branch(root: Path) -> None:

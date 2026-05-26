@@ -279,6 +279,47 @@ def test_status_renders_supervisor_activity_and_worker_latest_message(monkeypatc
     assert "Editing src/c3x/cli.py Running pytest next" in result.stdout
 
 
+def test_blocked_lists_flow_blocked_items_with_reason(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="fix worker",
+        status="in_progress",
+        priority=1,
+        labels=("flow", "blocked", "blocker-result-missing"),
+        notes=(
+            "Worker exited without writing result.json.\n"
+            "ERROR: You've hit your usage limit. Try again later."
+        ),
+    )
+    beads.items["bd-2"] = BeadSummary(id="bd-2", title="ready", labels=("flow", "ready"))
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+
+    result = runner.invoke(cli.app, ["blocked"])
+
+    assert result.exit_code == 0
+    assert "bd-1" in result.stdout
+    assert "fix worker" in result.stdout
+    assert "result missing" in result.stdout
+    assert "Codex usage limit" in result.stdout
+    assert "bd-2" not in result.stdout
+
+
+def test_blocked_reports_empty_state(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(id="bd-1", title="ready", labels=("flow", "ready"))
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+
+    result = runner.invoke(cli.app, ["blocked"])
+
+    assert result.exit_code == 0
+    assert "No blocked c3x flow tasks" in result.stdout
+
+
 def test_run_once_does_not_overwrite_tick_activity_with_waiting(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     monkeypatch.setattr(cli, "_root", lambda: tmp_path)
