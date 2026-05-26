@@ -53,6 +53,108 @@ def start_worker(root: Path, config: C3xConfig, task: BeadSummary) -> RunRecord:
     return record
 
 
+def resume_session_worker(
+    root: Path,
+    config: C3xConfig,
+    task: BeadSummary,
+    previous: RunRecord,
+    *,
+    session_id: str,
+    reason: str = "",
+) -> RunRecord:
+    attempt = _next_attempt(root, task.id)
+    worktree = Path(previous.worktree)
+    if not worktree.exists():
+        raise AgentError(f"cannot continue {task.id}: previous worktree is missing: {worktree}")
+
+    run_path = run_record_path(root, task.id)
+    prompt = prompt_path(root, task.id)
+    result = worktree / ".c3x" / "result.json"
+    last_message = last_message_path(root, task.id)
+    prompt.parent.mkdir(parents=True, exist_ok=True)
+    result.parent.mkdir(parents=True, exist_ok=True)
+    prompt.write_text(
+        _resume_worker_prompt(task, result, previous=previous, reason=reason),
+        encoding="utf-8",
+    )
+
+    command = _agent_command(
+        config,
+        worktree,
+        prompt,
+        result,
+        last_message,
+        resume_session_id=session_id,
+    )
+    process = subprocess.Popen(
+        command,
+        cwd=worktree,
+        text=True,
+        stdout=(prompt.parent / "stdout.log").open("w", encoding="utf-8"),
+        stderr=(prompt.parent / "stderr.log").open("w", encoding="utf-8"),
+        start_new_session=True,
+    )
+    record = RunRecord(
+        task_id=task.id,
+        branch=previous.branch,
+        worktree=str(worktree),
+        prompt=str(prompt),
+        result=str(result),
+        last_message=str(last_message),
+        pid=process.pid,
+        attempt=attempt,
+    )
+    record.save(run_path)
+    return record
+
+
+def continue_worktree_worker(
+    root: Path,
+    config: C3xConfig,
+    task: BeadSummary,
+    previous: RunRecord,
+    *,
+    reason: str = "",
+) -> RunRecord:
+    attempt = _next_attempt(root, task.id)
+    worktree = Path(previous.worktree)
+    if not worktree.exists():
+        raise AgentError(f"cannot continue {task.id}: previous worktree is missing: {worktree}")
+
+    run_path = run_record_path(root, task.id)
+    prompt = prompt_path(root, task.id)
+    result = worktree / ".c3x" / "result.json"
+    last_message = last_message_path(root, task.id)
+    prompt.parent.mkdir(parents=True, exist_ok=True)
+    result.parent.mkdir(parents=True, exist_ok=True)
+    prompt.write_text(
+        _continue_worktree_prompt(task, result, previous=previous, reason=reason),
+        encoding="utf-8",
+    )
+
+    command = _agent_command(config, worktree, prompt, result, last_message)
+    process = subprocess.Popen(
+        command,
+        cwd=worktree,
+        text=True,
+        stdout=(prompt.parent / "stdout.log").open("w", encoding="utf-8"),
+        stderr=(prompt.parent / "stderr.log").open("w", encoding="utf-8"),
+        start_new_session=True,
+    )
+    record = RunRecord(
+        task_id=task.id,
+        branch=previous.branch,
+        worktree=str(worktree),
+        prompt=str(prompt),
+        result=str(result),
+        last_message=str(last_message),
+        pid=process.pid,
+        attempt=attempt,
+    )
+    record.save(run_path)
+    return record
+
+
 def start_conflict_resolver(
     root: Path,
     config: C3xConfig,
@@ -121,6 +223,8 @@ def _agent_command(
     prompt: Path,
     result: Path,
     last_message: Path,
+    *,
+    resume_session_id: str | None = None,
 ) -> list[str]:
     executable = shlex.split(config.agents.codex_command)
     if not executable:
@@ -131,8 +235,10 @@ def _agent_command(
         "prompt": str(prompt),
         "result": str(result),
         "last_message": str(last_message),
+        "session_id": resume_session_id or "",
     }
-    args = [arg.format(**mapping) for arg in config.agents.codex_args]
+    template = config.agents.codex_resume_args if resume_session_id else config.agents.codex_args
+    args = [arg.format(**mapping) for arg in template]
     return [*executable, *args]
 
 
@@ -189,6 +295,129 @@ Required result shape:
   "summary": "What changed",
   "task_kind": "feature|bug|test|refactor|docs|infra|spike",
   "attempt": 1,
+  "changed_files": [],
+  "verification": [],
+  "blockers": [],
+  "blocker_category": null,
+  "proposed_tasks": [],
+  "scope_expansion": [],
+  "confidence": "high",
+  "unfinished": []
+}}
+```
+
+If stuck, set `status` to `blocked` or `failed`, fill `blocker_category`, `blockers`, and `unfinished`, and do not pretend the task is solved.
+"""
+
+
+def _resume_worker_prompt(
+    task: BeadSummary,
+    result: Path,
+    *,
+    previous: RunRecord,
+    reason: str,
+) -> str:
+    return f"""{caveman_mode_text()}
+
+# c3x worker session resume
+
+Task: {task.id}
+Title: {task.title}
+
+Continue this exact previous Codex session. The prior worker stopped before
+producing a completed result, likely because of a transient external failure.
+
+Previous attempt: {previous.attempt}
+Previous status: {previous.status}
+Previous outcome: {previous.outcome or "unknown"}
+Reason to continue: {reason or "transient or retryable worker interruption"}
+
+Use the existing conversation context and current worktree state. Continue from
+where the previous session stopped. Do not restart the task analysis unless the
+session context is insufficient or clearly stale.
+
+Supervisor owns task state, commits, merges, cleanup, and all Beads writes.
+
+Do not run Beads commands, including `bd prime`, `bd ready`, `bd update`, `bd close`,
+`bd create`, `bd dolt pull`, or `bd dolt push`.
+
+Do not run `git commit`, `git push`, `git pull`, `git merge`, or branch cleanup.
+Leave changed files in the worktree. The supervisor will commit and merge them after
+review.
+
+Write a structured JSON result to:
+{result}
+
+Required result shape:
+```json
+{{
+  "task_id": "{task.id}",
+  "status": "completed",
+  "summary": "What changed",
+  "task_kind": "feature|bug|test|refactor|docs|infra|spike",
+  "attempt": {previous.attempt + 1},
+  "changed_files": [],
+  "verification": [],
+  "blockers": [],
+  "blocker_category": null,
+  "proposed_tasks": [],
+  "scope_expansion": [],
+  "confidence": "high",
+  "unfinished": []
+}}
+```
+
+If stuck, set `status` to `blocked` or `failed`, fill `blocker_category`, `blockers`, and `unfinished`, and do not pretend the task is solved.
+"""
+
+
+def _continue_worktree_prompt(
+    task: BeadSummary,
+    result: Path,
+    *,
+    previous: RunRecord,
+    reason: str,
+) -> str:
+    return f"""{caveman_mode_text()}
+
+# c3x worker worktree continuation
+
+Task: {task.id}
+Title: {task.title}
+
+Start a fresh Codex context, but continue from the existing git worktree. The
+previous worker stopped before producing a completed result, and its partial file
+changes may be useful.
+
+Previous attempt: {previous.attempt}
+Previous status: {previous.status}
+Previous outcome: {previous.outcome or "unknown"}
+Reason to continue: {reason or "retry requested"}
+
+First inspect `git status`, relevant diffs, existing tests, and any current
+partial implementation. Preserve useful existing edits. Replace them only when
+they are clearly wrong for this task.
+
+Supervisor owns task state, commits, merges, cleanup, and all Beads writes.
+
+Do not run Beads commands, including `bd prime`, `bd ready`, `bd update`, `bd close`,
+`bd create`, `bd dolt pull`, or `bd dolt push`.
+
+Do not run `git commit`, `git push`, `git pull`, `git merge`, or branch cleanup.
+Leave changed files in the worktree. The supervisor will commit and merge them after
+review.
+
+Write a structured JSON result to:
+{result}
+
+Required result shape:
+```json
+{{
+  "task_id": "{task.id}",
+  "status": "completed",
+  "summary": "What changed",
+  "task_kind": "feature|bug|test|refactor|docs|infra|spike",
+  "attempt": {previous.attempt + 1},
   "changed_files": [],
   "verification": [],
   "blockers": [],

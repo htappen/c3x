@@ -25,6 +25,18 @@ class AgentConfig(BaseModel):
             "{prompt}",
         ]
     )
+    codex_resume_args: list[str] = Field(
+        default_factory=lambda: [
+            "exec",
+            "resume",
+            "--model",
+            "{model}",
+            "--output-last-message",
+            "{last_message}",
+            "{session_id}",
+            "{prompt}",
+        ]
+    )
 
 
 class ModelConfig(BaseModel):

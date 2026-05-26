@@ -14,5 +14,5 @@ def test_load_config_uses_defaults_when_missing(tmp_path: Path) -> None:
     config = load_config(tmp_path)
 
     assert config.agents.codex_command == "codex"
+    assert "resume" in config.agents.codex_resume_args
     assert config.limits.max_parallel_workers == 3
-

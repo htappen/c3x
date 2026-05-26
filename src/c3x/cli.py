@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -9,14 +10,14 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import typer
 from rich.console import Console, Group
 from rich.live import Live
 from rich.table import Table
 
-from c3x.agent import AgentError, start_conflict_resolver, start_worker
+from c3x.agent import AgentError, continue_worktree_worker, resume_session_worker, start_conflict_resolver, start_worker
 from c3x.beads import Beads, BeadsError, BeadSummary
 from c3x.config import FLOW_DIR, load_config, write_default_config
 from c3x.gitops import (
@@ -48,6 +49,7 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+RetryMode = Literal["session", "worktree", "fresh"]
 
 
 @dataclass(frozen=True)
@@ -341,18 +343,49 @@ def retry(
         bool,
         typer.Option("--all", help="Retry all currently blocked flow tasks."),
     ] = False,
+    resume_session: Annotated[
+        bool,
+        typer.Option(
+            "--resume-session",
+            help="Resume the previous Codex session. This is the default when no retry mode flag is passed.",
+        ),
+    ] = False,
+    continue_worktree: Annotated[
+        bool,
+        typer.Option(
+            "--continue-worktree",
+            help="Start a fresh Codex context in the previous attempt worktree.",
+        ),
+    ] = False,
+    fresh: Annotated[
+        bool,
+        typer.Option(
+            "--fresh",
+            help="Start a fresh Codex context in a new attempt worktree.",
+        ),
+    ] = False,
 ) -> None:
-    """Start a fresh worker attempt for blocked or stale work."""
+    """Retry blocked or stale work, resuming the previous Codex session by default."""
     root = _root()
     _warn_if_risky_flow_branch(root)
     config = load_config(root)
     beads = _beads(root)
     try:
+        retry_mode = _retry_mode_from_flags(
+            resume_session=resume_session,
+            continue_worktree=continue_worktree,
+            fresh=fresh,
+        )
         _import_finished_results(root, beads)
         task_ids = _retry_task_ids(beads, task_id=task_id, all_tasks=all_tasks)
         for item_id in task_ids:
-            record = _retry_task(root, config, beads, item_id)
-            console.print(f"[green]Retried[/green] {item_id} as attempt {record.attempt}")
+            record, mode_used = _retry_task(root, config, beads, item_id, retry_mode=retry_mode)
+            action = {
+                "session": "Resumed session",
+                "worktree": "Continued worktree",
+                "fresh": "Retried fresh",
+            }[mode_used]
+            console.print(f"[green]{action}[/green] {item_id} as attempt {record.attempt}")
             console.print(f"Worktree: {record.worktree}")
     except (AgentError, BeadsError, GitError, ValueError) as exc:
         raise typer.Exit(_error(str(exc))) from exc
@@ -990,6 +1023,26 @@ def _retry_task_ids(beads: Beads, *, task_id: str | None, all_tasks: bool) -> li
     return [item.id for item in blocked]
 
 
+def _retry_mode_from_flags(
+    *,
+    resume_session: bool,
+    continue_worktree: bool,
+    fresh: bool,
+) -> RetryMode:
+    selected = [
+        mode
+        for mode, enabled in (
+            ("session", resume_session),
+            ("worktree", continue_worktree),
+            ("fresh", fresh),
+        )
+        if enabled
+    ]
+    if len(selected) > 1:
+        raise ValueError("pass only one retry mode: --resume-session, --continue-worktree, or --fresh")
+    return selected[0] if selected else "session"
+
+
 def _conflict_task_ids(beads: Beads, *, task_id: str | None, all_tasks: bool) -> list[str]:
     if all_tasks and task_id:
         raise ValueError("pass either a task id or --all, not both")
@@ -1004,19 +1057,48 @@ def _conflict_task_ids(beads: Beads, *, task_id: str | None, all_tasks: bool) ->
     return [item.id for item in blocked]
 
 
-def _retry_task(root: Path, config: object, beads: Beads, task_id: str) -> RunRecord:
+def _retry_task(
+    root: Path,
+    config: object,
+    beads: Beads,
+    task_id: str,
+    *,
+    retry_mode: RetryMode = "session",
+) -> tuple[RunRecord, RetryMode]:
     task = beads.show(task_id)
     _ensure_retryable(root, task_id)
+    previous = _current_run_record(root, task_id)
+    session_id = _session_id_for_run(previous) if previous is not None else None
     _archive_current_run(root, task_id)
     beads.set_status(task_id, "open")
     beads.add_labels(task_id, ["flow", "ready"])
     beads.remove_labels(task_id, _retry_removed_labels(task))
-    record = start_worker(root, config, task)
+    worktree_exists = previous is not None and Path(previous.worktree).exists()
+    reason = _retry_reason(task, previous) if previous is not None else "retry requested"
+    if retry_mode == "session" and worktree_exists and session_id:
+        record = resume_session_worker(
+            root,
+            config,
+            task,
+            previous,
+            session_id=session_id,
+            reason=reason,
+        )
+        mode_used: RetryMode = "session"
+        note = f"c3x resumed session {session_id} as attempt {record.attempt}"
+    elif retry_mode in {"session", "worktree"} and worktree_exists:
+        record = continue_worktree_worker(root, config, task, previous, reason=reason)
+        mode_used = "worktree"
+        note = f"c3x continued worktree as attempt {record.attempt} from attempt {previous.attempt}"
+    else:
+        record = start_worker(root, config, task)
+        mode_used = "fresh"
+        note = f"c3x retry started attempt {record.attempt}"
     beads.set_status(task_id, "in_progress")
     beads.add_labels(task_id, ["flow", "running", f"attempt-{record.attempt}"])
     beads.remove_labels(task_id, ["ready", "reviewing", "blocked"])
-    beads.add_note(task_id, f"c3x retry started attempt {record.attempt}")
-    return record
+    beads.add_note(task_id, note)
+    return record, mode_used
 
 
 def _resolve_conflict_task(root: Path, config: object, beads: Beads, task_id: str) -> RunRecord:
@@ -1062,6 +1144,78 @@ def _ensure_retryable(root: Path, task_id: str) -> None:
         raise ValueError(f"{task_id} is already landed")
     if record.status == "running" and record.pid is not None and _process_is_running(record.pid):
         raise ValueError(f"{task_id} still has a running worker pid {record.pid}")
+
+
+def _current_run_record(root: Path, task_id: str) -> RunRecord | None:
+    path = run_record_path(root, task_id)
+    if not path.exists():
+        return None
+    return RunRecord.load(path)
+
+
+def _session_id_for_run(record: RunRecord | None) -> str | None:
+    if record is None:
+        return None
+    for path in (Path(record.prompt).parent / "stderr.log", Path(record.prompt).parent / "stdout.log"):
+        session_id = _extract_session_id(_read_tail(path, max_chars=12000))
+        if session_id:
+            return session_id
+    return None
+
+
+def _extract_session_id(text: str) -> str | None:
+    match = re.search(
+        r"session id:\s*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
+        text,
+    )
+    return match.group(1) if match else None
+
+
+def _retry_reason(task: BeadSummary, previous: RunRecord) -> str:
+    reason = _blocked_reason(task)
+    if reason and reason != "blocked label present":
+        return reason
+    if previous.outcome:
+        return previous.outcome
+    return "retry requested"
+
+
+def _is_transient_worker_failure(record: RunRecord) -> bool:
+    if not Path(record.worktree).exists():
+        return False
+    evidence = "\n".join(
+        [
+            _read_tail(Path(record.prompt).parent / "stderr.log", max_chars=12000),
+            _read_tail(Path(record.prompt).parent / "stdout.log", max_chars=12000),
+            _read_tail(Path(record.last_message), max_chars=4000),
+        ]
+    ).lower()
+    return any(
+        pattern in evidence
+        for pattern in (
+            "you've hit your usage limit",
+            "usage limit",
+            "rate limit",
+            "429",
+            "failed to connect",
+            "failed to lookup address information",
+            "stream disconnected before completion",
+            "error sending request",
+            "connection reset",
+            "temporarily unavailable",
+            "timeout",
+            "timed out",
+        )
+    )
+
+
+def _supervisor_retry_mode(record: RunRecord) -> RetryMode:
+    """Supervisor retry charter: preserve the most context that can be safely reused."""
+    if _session_id_for_run(record):
+        return "session"
+    if Path(record.worktree).exists():
+        return "worktree"
+    return "fresh"
 
 
 def _archive_current_run(root: Path, task_id: str) -> None:
@@ -1730,8 +1884,18 @@ def _recover_interrupted_workers(root: Path, beads: Beads) -> None:
         if record.pid is not None and _process_is_running(record.pid):
             continue
         try:
-            _retry_task(root, config, beads, record.task_id)
-            console.print(f"[yellow]Restarted interrupted worker[/yellow] {record.task_id}")
+            if _is_transient_worker_failure(record):
+                _, mode_used = _retry_task(
+                    root,
+                    config,
+                    beads,
+                    record.task_id,
+                    retry_mode=_supervisor_retry_mode(record),
+                )
+                action = "Resumed session" if mode_used == "session" else "Continued worktree"
+                console.print(f"[yellow]{action}[/yellow] {record.task_id}")
+            else:
+                _block_missing_worker_result(root, beads, record)
         except (AgentError, BeadsError, GitError, ValueError) as exc:
             beads.add_note(record.task_id, f"c3x could not restart interrupted worker: {exc}")
             beads.add_labels(record.task_id, ["flow", "blocked", "blocker-restart-failed"])

@@ -438,29 +438,44 @@ def test_import_copies_worktree_result_to_run_directory(tmp_path: Path) -> None:
     assert ("bd-1", ["flow", "reviewing", "completed-by-agent"]) in beads.added_labels
 
 
-def test_recover_interrupted_worker_restarts_dead_running_attempt(monkeypatch, tmp_path: Path) -> None:
+def test_recover_interrupted_worker_resumes_transient_session(monkeypatch, tmp_path: Path) -> None:
     beads = _RecordingBeads()
     beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", labels=("flow", "running"))
     run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    worktree.mkdir(parents=True)
     RunRecord(
         task_id="bd-1",
         branch="c3x/bd-1-fix",
-        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"),
+        worktree=str(worktree),
         prompt=str(run_dir / "prompt.md"),
-        result=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix" / ".c3x" / "result.json"),
+        result=str(worktree / ".c3x" / "result.json"),
         last_message=str(run_dir / "last-message.md"),
         pid=12345,
         status="running",
         attempt=1,
     ).save(run_dir / "run.json")
+    (run_dir / "stderr.log").write_text(
+        "session id: 019e61af-8603-7b53-8099-9284e6bc16bd\n"
+        "ERROR: You've hit your usage limit. Try again later.\n",
+        encoding="utf-8",
+    )
 
-    def fake_start_worker(root: Path, config: object, task: BeadSummary) -> RunRecord:
+    def fake_resume_session_worker(
+        root: Path,
+        config: object,
+        task: BeadSummary,
+        previous: RunRecord,
+        *,
+        session_id: str,
+        reason: str = "",
+    ) -> RunRecord:
         record = RunRecord(
             task_id=task.id,
-            branch="c3x/bd-1-fix-attempt-2",
-            worktree=str(root / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-2"),
+            branch=previous.branch,
+            worktree=previous.worktree,
             prompt=str(root / ".flow" / "runs" / task.id / "prompt.md"),
-            result=str(root / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-2" / ".c3x" / "result.json"),
+            result=previous.result,
             last_message=str(root / ".flow" / "runs" / task.id / "last-message.md"),
             pid=67890,
             attempt=2,
@@ -470,7 +485,7 @@ def test_recover_interrupted_worker_restarts_dead_running_attempt(monkeypatch, t
 
     monkeypatch.setattr(cli, "load_config", lambda root: object())
     monkeypatch.setattr(cli, "_process_is_running", lambda pid: False)
-    monkeypatch.setattr(cli, "start_worker", fake_start_worker)
+    monkeypatch.setattr(cli, "resume_session_worker", fake_resume_session_worker)
 
     cli._recover_interrupted_workers(tmp_path, beads)
 
@@ -553,7 +568,7 @@ def test_kill_worker_process_tree_avoids_shared_process_group(monkeypatch) -> No
     assert killed_pids == [(12346, cli.signal.SIGKILL), (12345, cli.signal.SIGKILL)]
 
 
-def test_retry_archives_current_run_and_starts_fresh_attempt(monkeypatch, tmp_path: Path) -> None:
+def test_retry_fresh_archives_current_run_and_starts_new_worktree(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _RecordingBeads()
     beads.items["bd-1"] = BeadSummary(
@@ -593,7 +608,7 @@ def test_retry_archives_current_run_and_starts_fresh_attempt(monkeypatch, tmp_pa
     monkeypatch.setattr(cli, "current_branch", lambda root: "feature")
     monkeypatch.setattr(cli, "start_worker", fake_start_worker)
 
-    result = runner.invoke(cli.app, ["retry", "bd-1"])
+    result = runner.invoke(cli.app, ["retry", "bd-1", "--fresh"])
 
     assert result.exit_code == 0
     assert (tmp_path / ".flow" / "runs" / "bd-1-attempt-1" / "run.json").exists()
@@ -602,6 +617,124 @@ def test_retry_archives_current_run_and_starts_fresh_attempt(monkeypatch, tmp_pa
     assert ("bd-1", "in_progress") in beads.statuses
     assert ("bd-1", ["flow", "running", "attempt-2"]) in beads.added_labels
     assert any("blocker-result-missing" in labels for item_id, labels in beads.removed_labels if item_id == "bd-1")
+
+
+def test_retry_defaults_to_resuming_previous_session(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="fix",
+        status="blocked",
+        labels=("flow", "blocked", "blocker-result-missing"),
+    )
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    worktree.mkdir(parents=True)
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(worktree / ".c3x" / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="blocked",
+        attempt=1,
+    ).save(run_dir / "run.json")
+    (run_dir / "stderr.log").write_text(
+        "session id: 019e61af-8603-7b53-8099-9284e6bc16bd\n",
+        encoding="utf-8",
+    )
+    resumed: list[str] = []
+
+    def fake_resume_session_worker(
+        root: Path,
+        config: object,
+        task: BeadSummary,
+        previous: RunRecord,
+        *,
+        session_id: str,
+        reason: str = "",
+    ) -> RunRecord:
+        resumed.append(session_id)
+        record = RunRecord(
+            task_id=task.id,
+            branch=previous.branch,
+            worktree=previous.worktree,
+            prompt=str(root / ".flow" / "runs" / task.id / "prompt.md"),
+            result=previous.result,
+            last_message=str(root / ".flow" / "runs" / task.id / "last-message.md"),
+            attempt=2,
+        )
+        record.save(root / ".flow" / "runs" / task.id / "run.json")
+        return record
+
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "load_config", lambda root: object())
+    monkeypatch.setattr(cli, "current_branch", lambda root: "feature")
+    monkeypatch.setattr(cli, "resume_session_worker", fake_resume_session_worker)
+
+    result = runner.invoke(cli.app, ["retry", "bd-1"])
+
+    assert result.exit_code == 0
+    assert "Resumed session" in result.stdout
+    assert resumed == ["019e61af-8603-7b53-8099-9284e6bc16bd"]
+    assert RunRecord.load(run_dir / "run.json").attempt == 2
+    assert ("bd-1", ["flow", "running", "attempt-2"]) in beads.added_labels
+
+
+def test_retry_can_continue_existing_worktree_with_fresh_context(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", status="blocked", labels=("flow", "blocked"))
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    worktree.mkdir(parents=True)
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(worktree / ".c3x" / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="blocked",
+        attempt=1,
+    ).save(run_dir / "run.json")
+    continued: list[str] = []
+
+    def fake_continue_worktree_worker(
+        root: Path,
+        config: object,
+        task: BeadSummary,
+        previous: RunRecord,
+        *,
+        reason: str = "",
+    ) -> RunRecord:
+        continued.append(previous.worktree)
+        record = RunRecord(
+            task_id=task.id,
+            branch=previous.branch,
+            worktree=previous.worktree,
+            prompt=str(root / ".flow" / "runs" / task.id / "prompt.md"),
+            result=previous.result,
+            last_message=str(root / ".flow" / "runs" / task.id / "last-message.md"),
+            attempt=2,
+        )
+        record.save(root / ".flow" / "runs" / task.id / "run.json")
+        return record
+
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "load_config", lambda root: object())
+    monkeypatch.setattr(cli, "current_branch", lambda root: "feature")
+    monkeypatch.setattr(cli, "continue_worktree_worker", fake_continue_worktree_worker)
+
+    result = runner.invoke(cli.app, ["retry", "bd-1", "--continue-worktree"])
+
+    assert result.exit_code == 0
+    assert "Continued worktree" in result.stdout
+    assert continued == [str(worktree)]
 
 
 def test_retry_all_retries_blocked_flow_tasks(monkeypatch, tmp_path: Path) -> None:

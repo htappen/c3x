@@ -37,6 +37,34 @@ def test_agent_command_substitutes_runtime_paths(tmp_path: Path) -> None:
     ]
 
 
+def test_agent_command_can_resume_session(tmp_path: Path) -> None:
+    config = C3xConfig.model_validate(
+        {
+            "agents": {
+                "codex_command": "fake-codex",
+                "codex_resume_args": ["exec", "resume", "{session_id}", "{prompt}"],
+            }
+        }
+    )
+
+    command = _agent_command(
+        config,
+        tmp_path / "wt",
+        tmp_path / "prompt.md",
+        tmp_path / "result.json",
+        tmp_path / "last.md",
+        resume_session_id="019e61af-8603-7b53-8099-9284e6bc16bd",
+    )
+
+    assert command == [
+        "fake-codex",
+        "exec",
+        "resume",
+        "019e61af-8603-7b53-8099-9284e6bc16bd",
+        str(tmp_path / "prompt.md"),
+    ]
+
+
 def test_worker_prompt_includes_caveman_mode(tmp_path: Path) -> None:
     prompt = _worker_prompt(
         BeadSummary(id="bd-1", title="Fix auth"),
