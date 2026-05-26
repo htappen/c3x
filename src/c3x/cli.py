@@ -1347,6 +1347,8 @@ def _cleanup_actions(root: Path, *, task_id: str | None) -> list[CleanupAction]:
                 except GitError as exc:
                     if not _is_missing_ref_error(exc):
                         raise
+                    if not Path(record.worktree).exists():
+                        continue
                     actions.append(
                         CleanupAction(
                             task_id=record.task_id,
@@ -1771,8 +1773,9 @@ def _run_cleanup_action(root: Path, action: CleanupAction, *, force: bool) -> No
     if action.repair_merge:
         commit_worktree_changes(action.worktree, f"Complete c3x task {action.task_id}")
         merge_branch(root, action.branch)
-    remove_worktree(root, action.worktree, force=force or action.reason.startswith("landed"))
-    delete_branch(root, action.branch, force=force)
+    cleanup_force = force or action.reason.startswith("landed") or action.remove_run_dir
+    remove_worktree(root, action.worktree, force=cleanup_force)
+    delete_branch(root, action.branch, force=cleanup_force)
     if action.remove_run_dir and action.run_dir.exists():
         shutil.rmtree(action.run_dir)
 
