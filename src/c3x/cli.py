@@ -176,7 +176,7 @@ def status(
     if not watch:
         console.print(view)
         return
-    with Live(view, console=console, refresh_per_second=4) as live:
+    with _status_live(view) as live:
         while True:
             time.sleep(interval)
             try:
@@ -251,7 +251,7 @@ def run(
     """Run the c3x supervisor loop."""
     root = _root()
     _write_activity(root, "starting supervisor loop")
-    with Live(_build_status_view(root), console=console, refresh_per_second=4) as live:
+    with _status_live(_build_status_view(root)) as live:
         while True:
             if pause_path(root).exists():
                 _write_activity(root, "paused")
@@ -294,7 +294,7 @@ def watch(
     """Run the autonomous c3x watch loop."""
     root = _root()
     _write_activity(root, "starting autonomous watch loop")
-    with Live(_build_status_view(root), console=console, refresh_per_second=4) as live:
+    with _status_live(_build_status_view(root)) as live:
         while True:
             if pause_path(root).exists():
                 _write_activity(root, "paused")
@@ -756,8 +756,17 @@ def _print_blocked_items(items: list[BeadSummary]) -> None:
     console.print(table)
 
 
+def _status_live(view: Group) -> Live:
+    return Live(view, console=console, refresh_per_second=4, screen=True)
+
+
 def _build_status_view(root: Path) -> Group:
-    return Group(_build_activity_table(root), _build_status_table(root), _build_workers_table(root))
+    return Group(
+        _build_activity_table(root),
+        _build_status_table(root),
+        _build_codex_status_table(root),
+        _build_workers_table(root),
+    )
 
 
 def _build_activity_table(root: Path) -> Table:
@@ -795,6 +804,56 @@ def _build_workers_table(root: Path) -> Table:
             latest,
         )
     return table
+
+
+def _build_codex_status_table(root: Path) -> Table:
+    table = Table(title="codex /status")
+    table.add_column("Task")
+    table.add_column("Latest")
+    rows = 0
+    for record in _live_worker_records(root):
+        status = _codex_status_for_record(record)
+        if status:
+            table.add_row(record.task_id, status)
+            rows += 1
+    if rows == 0:
+        table.add_row("-", "no captured /status output")
+    return table
+
+
+def _codex_status_for_record(record: RunRecord) -> str:
+    run_dir = Path(record.prompt).parent
+    text = "\n".join(
+        [
+            _read_tail(Path(record.last_message), max_chars=4000),
+            _read_tail(run_dir / "stderr.log", max_chars=12000),
+            _read_tail(run_dir / "stdout.log", max_chars=12000),
+        ]
+    )
+    return _extract_codex_status(text)
+
+
+def _extract_codex_status(text: str) -> str:
+    lines = [line.strip() for line in text.splitlines()]
+    marker = -1
+    for index, line in enumerate(lines):
+        normalized = line.lower().strip()
+        if normalized == "/status" or normalized.startswith("codex /status"):
+            marker = index
+    if marker < 0:
+        return ""
+    status_lines: list[str] = []
+    for line in lines[marker + 1 :]:
+        if not line:
+            if status_lines:
+                break
+            continue
+        if line.startswith("/"):
+            break
+        status_lines.append(line)
+        if len(status_lines) >= 8:
+            break
+    return _one_line("\n".join(status_lines))
 
 
 def _build_status_table(root: Path) -> Table:

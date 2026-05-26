@@ -286,6 +286,51 @@ def test_status_renders_supervisor_activity_and_worker_latest_message(monkeypatc
     assert "Editing src/c3x/cli.py Running pytest next" in result.stdout
 
 
+def test_status_renders_captured_codex_status(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _StatusBeads()
+    run_dir = tmp_path / ".flow" / "runs" / "bd-3"
+    last_message = run_dir / "last-message.md"
+    last_message.parent.mkdir(parents=True)
+    last_message.write_text(
+        "/status\n"
+        "Model: gpt-5.4-mini\n"
+        "Context: 12k / 50k\n"
+        "\n"
+        "continuing task",
+        encoding="utf-8",
+    )
+    RunRecord(
+        task_id="bd-3",
+        branch="c3x/bd-3-running",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-3-running"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(last_message),
+        pid=1234,
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "_process_is_running", lambda pid: pid == 1234)
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda root: type("Config", (), {"limits": type("Limits", (), {"max_parallel_workers": 3})()})(),
+    )
+
+    result = runner.invoke(cli.app, ["status"])
+
+    assert result.exit_code == 0
+    assert "codex /status" in result.stdout
+    assert "Model: gpt-5.4-mini Context: 12k / 50k" in result.stdout
+
+
+def test_status_live_uses_alternate_screen() -> None:
+    live = cli._status_live(cli._build_activity_table(Path("/tmp")))
+
+    assert live._screen is True
+
+
 def test_status_workers_table_hides_dead_and_non_running_records(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _StatusBeads()
