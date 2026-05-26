@@ -2529,6 +2529,7 @@ def _live_worker_records(root: Path) -> list[RunRecord]:
 def _load_worker_result(root: Path, task_id: str) -> WorkerResult:
     path = result_path(root, task_id)
     current_attempt = 1
+    record: RunRecord | None = None
     if not path.exists():
         record_path = run_record_path(root, task_id)
         if record_path.exists():
@@ -2541,9 +2542,37 @@ def _load_worker_result(root: Path, task_id: str) -> WorkerResult:
             evidence_record, result = completed_evidence
             _save_canonical_result(root, task_id, Path(evidence_record.result).read_text(encoding="utf-8"))
             return result
+    if not path.exists() and record is not None:
+        synthesized = _missing_result_worker_result(root, record)
+        if synthesized is not None:
+            _save_canonical_result(root, task_id, synthesized.model_dump_json(indent=2) + "\n")
+            return synthesized
     if not path.exists():
         raise ValueError(f"missing worker result: {path}")
     return WorkerResult.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+def _missing_result_worker_result(root: Path, record: RunRecord) -> WorkerResult | None:
+    last_message = _read_tail(Path(record.last_message), max_chars=4000)
+    if not last_message:
+        return None
+    blockers = [
+        f"Worker final message exists but result.json is missing at {record.result}.",
+        f"Last message excerpt: {_compact_excerpt(last_message, limit=1000)}",
+    ]
+    if _scan_conflict_markers(Path(record.worktree)):
+        blockers.insert(0, "Conflict markers remain in the worker worktree.")
+    return WorkerResult(
+        task_id=record.task_id,
+        status="blocked",
+        summary="Worker finished without writing result.json.",
+        task_kind="merge-conflict" if "conflict" in record.branch else None,
+        attempt=record.attempt,
+        blockers=blockers,
+        blocker_category="merge-conflict" if "conflict" in record.branch else "result-missing",
+        confidence="low",
+        unfinished=[],
+    )
 
 
 def _review_result(result: WorkerResult) -> None:

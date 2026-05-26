@@ -840,6 +840,34 @@ def test_review_does_not_use_older_archived_result_for_newer_attempt(tmp_path: P
         raise AssertionError("expected missing worker result")
 
 
+def test_review_saves_blocked_result_when_final_message_exists_without_result(tmp_path: Path) -> None:
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-conflict-attempt-5"
+    worktree.mkdir(parents=True)
+    conflicted = worktree / "app.py"
+    conflicted.write_text("<<<<<<< HEAD\nleft\n=======\nright\n>>>>>>> branch\n", encoding="utf-8")
+    last_message = run_dir / "last-message.md"
+    last_message.parent.mkdir(parents=True)
+    last_message.write_text("Merge conflict resolved, but conflict markers remain in app.py.", encoding="utf-8")
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix-conflict-attempt-5",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(worktree / ".c3x" / "result.json"),
+        last_message=str(last_message),
+        status="running",
+        attempt=5,
+    ).save(run_dir / "run.json")
+
+    result = cli._load_worker_result(tmp_path, "bd-1")
+
+    assert result.status == "blocked"
+    assert result.blocker_category == "merge-conflict"
+    assert any("result.json is missing" in blocker for blocker in result.blockers)
+    assert (run_dir / "result.json").exists()
+
+
 def test_missing_result_note_summarizes_logs_without_embedding_them(monkeypatch, tmp_path: Path) -> None:
     beads = _RecordingBeads()
     beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", labels=("flow", "running"))
