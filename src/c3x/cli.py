@@ -17,7 +17,14 @@ from rich.console import Console, Group
 from rich.live import Live
 from rich.table import Table
 
-from c3x.agent import AgentError, continue_worktree_worker, resume_session_worker, start_conflict_resolver, start_worker
+from c3x.agent import (
+    AgentError,
+    _next_attempt,
+    continue_worktree_worker,
+    resume_session_worker,
+    start_conflict_resolver,
+    start_worker,
+)
 from c3x.beads import Beads, BeadsError, BeadSummary
 from c3x.config import FLOW_DIR, load_config, write_default_config
 from c3x.gitops import (
@@ -1166,7 +1173,8 @@ def _retry_task(
     _ensure_retryable(root, task_id)
     previous = _current_run_record(root, task_id)
     session_id = _session_id_for_run(previous) if previous is not None else None
-    _archive_current_run(root, task_id)
+    attempt = _next_attempt(root, task_id)
+    _archive_current_run(root, task_id, archive_attempt=attempt)
     beads.set_status(task_id, "open")
     beads.add_labels(task_id, ["flow", "ready"])
     beads.remove_labels(task_id, _retry_removed_labels(task))
@@ -1180,15 +1188,16 @@ def _retry_task(
             previous,
             session_id=session_id,
             reason=reason,
+            attempt=attempt,
         )
         mode_used: RetryMode = "session"
         note = f"c3x resumed session {session_id} as attempt {record.attempt}"
     elif retry_mode in {"session", "worktree"} and worktree_exists:
-        record = continue_worktree_worker(root, config, task, previous, reason=reason)
+        record = continue_worktree_worker(root, config, task, previous, reason=reason, attempt=attempt)
         mode_used = "worktree"
         note = f"c3x continued worktree as attempt {record.attempt} from attempt {previous.attempt}"
     else:
-        record = start_worker(root, config, task)
+        record = start_worker(root, config, task, attempt=attempt)
         mode_used = "fresh"
         note = f"c3x retry started attempt {record.attempt}"
     beads.set_status(task_id, "in_progress")
@@ -1201,11 +1210,12 @@ def _retry_task(
 def _resolve_conflict_task(root: Path, config: object, beads: Beads, task_id: str) -> RunRecord:
     task = beads.show(task_id)
     _ensure_retryable(root, task_id)
-    previous = RunRecord.load(run_record_path(root, task_id))
+    previous = _load_repaired_current_run_record(root, task_id)
     original_result = _read_original_result(root, task_id)
     target_branch = current_branch(root)
     target_revision = rev_parse(root, "HEAD")
-    _archive_current_run(root, task_id)
+    attempt = _next_attempt(root, task_id)
+    _archive_current_run(root, task_id, archive_attempt=attempt)
     beads.set_status(task_id, "open")
     beads.add_labels(task_id, ["flow", "ready"])
     beads.remove_labels(task_id, _retry_removed_labels(task))
@@ -1217,6 +1227,7 @@ def _resolve_conflict_task(root: Path, config: object, beads: Beads, task_id: st
         target_branch=target_branch,
         target_revision=target_revision,
         original_result=original_result,
+        attempt=attempt,
     )
     beads.set_status(task_id, "in_progress")
     beads.add_labels(task_id, ["flow", "running", "conflict-resolver", f"attempt-{record.attempt}"])
@@ -1254,7 +1265,7 @@ def _load_repaired_current_run_record(root: Path, task_id: str) -> RunRecord:
     path = run_record_path(root, task_id)
     record = RunRecord.load(path)
     repaired = _repaired_run_record(path, record)
-    if _record_points_to_missing_result_or_worktree(repaired):
+    if _can_repair_from_completed_evidence(repaired) and _record_points_to_missing_result_or_worktree(repaired):
         completed_evidence = _completed_result_evidence(root, task_id)
         if completed_evidence is not None:
             evidence_record, _ = completed_evidence
@@ -1273,6 +1284,10 @@ def _load_repaired_current_run_record(root: Path, task_id: str) -> RunRecord:
 
 def _record_points_to_missing_result_or_worktree(record: RunRecord) -> bool:
     return not Path(record.worktree).exists() or not Path(record.result).exists()
+
+
+def _can_repair_from_completed_evidence(record: RunRecord) -> bool:
+    return record.status in {"completed", "reviewed", "landed"}
 
 
 def _session_id_for_run(record: RunRecord | None) -> str | None:
@@ -1338,13 +1353,13 @@ def _supervisor_retry_mode(record: RunRecord) -> RetryMode:
     return "fresh"
 
 
-def _archive_current_run(root: Path, task_id: str) -> None:
+def _archive_current_run(root: Path, task_id: str, *, archive_attempt: int | None = None) -> None:
     run_dir = run_record_path(root, task_id).parent
     if not run_dir.exists():
         return
     try:
         record = RunRecord.load(run_dir / "run.json")
-        suffix = f"attempt-{record.attempt}"
+        suffix = f"attempt-{archive_attempt or _record_attempt(record)}"
     except Exception:
         suffix = "previous"
     target = _unique_archive_path(run_dir.with_name(f"{task_id}-{suffix}"))
@@ -2516,8 +2531,13 @@ def _load_worker_result(root: Path, task_id: str) -> WorkerResult:
     if not path.exists():
         record_path = run_record_path(root, task_id)
         if record_path.exists():
-            record = RunRecord.load(record_path)
+            record = _load_repaired_current_run_record(root, task_id)
             path = _result_file_for_record(record)
+    if not path.exists():
+        completed_evidence = _completed_result_evidence(root, task_id)
+        if completed_evidence is not None:
+            _, result = completed_evidence
+            return result
     if not path.exists():
         raise ValueError(f"missing worker result: {path}")
     return WorkerResult.model_validate_json(path.read_text(encoding="utf-8"))

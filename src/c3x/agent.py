@@ -17,8 +17,8 @@ class AgentError(RuntimeError):
     pass
 
 
-def start_worker(root: Path, config: C3xConfig, task: BeadSummary) -> RunRecord:
-    attempt = _next_attempt(root, task.id)
+def start_worker(root: Path, config: C3xConfig, task: BeadSummary, *, attempt: int | None = None) -> RunRecord:
+    attempt = attempt or _next_attempt(root, task.id)
     branch = _attempt_branch(task.id, task.title, attempt)
     worktree = worktrees_dir(root) / branch.replace("/", "-")
     create_worktree(root, branch, worktree)
@@ -62,8 +62,9 @@ def resume_session_worker(
     *,
     session_id: str,
     reason: str = "",
+    attempt: int | None = None,
 ) -> RunRecord:
-    attempt = _next_attempt(root, task.id)
+    attempt = attempt or _next_attempt(root, task.id)
     worktree = Path(previous.worktree)
     if not worktree.exists():
         raise AgentError(f"cannot continue {task.id}: previous worktree is missing: {worktree}")
@@ -116,8 +117,9 @@ def continue_worktree_worker(
     previous: RunRecord,
     *,
     reason: str = "",
+    attempt: int | None = None,
 ) -> RunRecord:
-    attempt = _next_attempt(root, task.id)
+    attempt = attempt or _next_attempt(root, task.id)
     worktree = Path(previous.worktree)
     if not worktree.exists():
         raise AgentError(f"cannot continue {task.id}: previous worktree is missing: {worktree}")
@@ -165,8 +167,9 @@ def start_conflict_resolver(
     target_branch: str,
     target_revision: str,
     original_result: str,
+    attempt: int | None = None,
 ) -> RunRecord:
-    attempt = _next_attempt(root, task.id)
+    attempt = attempt or _next_attempt(root, task.id)
     branch = _conflict_branch(task.id, task.title, attempt)
     worktree = worktrees_dir(root) / branch.replace("/", "-")
     conflicted = create_conflict_resolution_worktree(

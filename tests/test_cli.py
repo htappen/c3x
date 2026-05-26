@@ -1018,6 +1018,7 @@ def test_recover_interrupted_worker_resumes_transient_session(monkeypatch, tmp_p
         *,
         session_id: str,
         reason: str = "",
+        attempt: int | None = None,
     ) -> RunRecord:
         record = RunRecord(
             task_id=task.id,
@@ -1027,7 +1028,7 @@ def test_recover_interrupted_worker_resumes_transient_session(monkeypatch, tmp_p
             result=previous.result,
             last_message=str(root / ".flow" / "runs" / task.id / "last-message.md"),
             pid=67890,
-            attempt=2,
+            attempt=attempt or 2,
         )
         record.save(root / ".flow" / "runs" / task.id / "run.json")
         return record
@@ -1041,7 +1042,7 @@ def test_recover_interrupted_worker_resumes_transient_session(monkeypatch, tmp_p
     saved = RunRecord.load(run_dir / "run.json")
     assert saved.attempt == 2
     assert saved.pid == 67890
-    assert (tmp_path / ".flow" / "runs" / "bd-1-attempt-1" / "run.json").exists()
+    assert (tmp_path / ".flow" / "runs" / "bd-1-attempt-2" / "run.json").exists()
     assert ("bd-1", "in_progress") in beads.statuses
     assert ("bd-1", ["flow", "running", "attempt-2"]) in beads.added_labels
 
@@ -1141,7 +1142,13 @@ def test_retry_fresh_archives_current_run_and_starts_new_worktree(monkeypatch, t
         attempt=1,
     ).save(run_dir / "run.json")
 
-    def fake_start_worker(root: Path, config: object, task: BeadSummary) -> RunRecord:
+    def fake_start_worker(
+        root: Path,
+        config: object,
+        task: BeadSummary,
+        *,
+        attempt: int | None = None,
+    ) -> RunRecord:
         record = RunRecord(
             task_id=task.id,
             branch="c3x/bd-1-fix-attempt-2",
@@ -1149,7 +1156,7 @@ def test_retry_fresh_archives_current_run_and_starts_new_worktree(monkeypatch, t
             prompt=str(root / ".flow" / "runs" / task.id / "prompt.md"),
             result=str(root / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-2" / ".c3x" / "result.json"),
             last_message=str(root / ".flow" / "runs" / task.id / "last-message.md"),
-            attempt=2,
+            attempt=attempt or 2,
         )
         record.save(root / ".flow" / "runs" / task.id / "run.json")
         return record
@@ -1163,7 +1170,7 @@ def test_retry_fresh_archives_current_run_and_starts_new_worktree(monkeypatch, t
     result = runner.invoke(cli.app, ["retry", "bd-1", "--fresh"])
 
     assert result.exit_code == 0
-    archived = tmp_path / ".flow" / "runs" / "bd-1-attempt-1"
+    archived = tmp_path / ".flow" / "runs" / "bd-1-attempt-2"
     archived_record = RunRecord.load(archived / "run.json")
     assert archived_record.prompt == str(archived / "prompt.md")
     assert archived_record.last_message == str(archived / "last-message.md")
@@ -1172,6 +1179,59 @@ def test_retry_fresh_archives_current_run_and_starts_new_worktree(monkeypatch, t
     assert ("bd-1", "in_progress") in beads.statuses
     assert ("bd-1", ["flow", "running", "attempt-2"]) in beads.added_labels
     assert any("blocker-result-missing" in labels for item_id, labels in beads.removed_labels if item_id == "bd-1")
+
+
+def test_retry_archive_dir_uses_new_attempt_number(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", status="blocked", labels=("flow", "blocked"))
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-3"
+    worktree.mkdir(parents=True)
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix-attempt-3",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(worktree / ".c3x" / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="blocked",
+        attempt=3,
+    ).save(run_dir / "run.json")
+    (tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-5").mkdir(parents=True)
+
+    def fake_start_worker(
+        root: Path,
+        config: object,
+        task: BeadSummary,
+        *,
+        attempt: int | None = None,
+    ) -> RunRecord:
+        record = RunRecord(
+            task_id=task.id,
+            branch=f"c3x/bd-1-fix-attempt-{attempt}",
+            worktree=str(root / ".flow" / "worktrees" / f"c3x-bd-1-fix-attempt-{attempt}"),
+            prompt=str(root / ".flow" / "runs" / task.id / "prompt.md"),
+            result=str(root / ".flow" / "worktrees" / f"c3x-bd-1-fix-attempt-{attempt}" / ".c3x" / "result.json"),
+            last_message=str(root / ".flow" / "runs" / task.id / "last-message.md"),
+            attempt=attempt or 1,
+        )
+        record.save(root / ".flow" / "runs" / task.id / "run.json")
+        return record
+
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "load_config", lambda root: object())
+    monkeypatch.setattr(cli, "current_branch", lambda root: "feature")
+    monkeypatch.setattr(cli, "start_worker", fake_start_worker)
+
+    result = runner.invoke(cli.app, ["retry", "bd-1", "--fresh"])
+
+    assert result.exit_code == 0
+    assert (tmp_path / ".flow" / "runs" / "bd-1-attempt-6" / "run.json").exists()
+    assert not (tmp_path / ".flow" / "runs" / "bd-1-attempt-3-2").exists()
+    assert RunRecord.load(run_dir / "run.json").attempt == 6
+    assert ("bd-1", ["flow", "running", "attempt-6"]) in beads.added_labels
 
 
 def test_retry_defaults_to_resuming_previous_session(monkeypatch, tmp_path: Path) -> None:
@@ -1210,6 +1270,7 @@ def test_retry_defaults_to_resuming_previous_session(monkeypatch, tmp_path: Path
         *,
         session_id: str,
         reason: str = "",
+        attempt: int | None = None,
     ) -> RunRecord:
         resumed.append(session_id)
         record = RunRecord(
@@ -1219,7 +1280,7 @@ def test_retry_defaults_to_resuming_previous_session(monkeypatch, tmp_path: Path
             prompt=str(root / ".flow" / "runs" / task.id / "prompt.md"),
             result=previous.result,
             last_message=str(root / ".flow" / "runs" / task.id / "last-message.md"),
-            attempt=2,
+            attempt=attempt or 2,
         )
         record.save(root / ".flow" / "runs" / task.id / "run.json")
         return record
@@ -1265,6 +1326,7 @@ def test_retry_can_continue_existing_worktree_with_fresh_context(monkeypatch, tm
         previous: RunRecord,
         *,
         reason: str = "",
+        attempt: int | None = None,
     ) -> RunRecord:
         continued.append(previous.worktree)
         record = RunRecord(
@@ -1274,7 +1336,7 @@ def test_retry_can_continue_existing_worktree_with_fresh_context(monkeypatch, tm
             prompt=str(root / ".flow" / "runs" / task.id / "prompt.md"),
             result=previous.result,
             last_message=str(root / ".flow" / "runs" / task.id / "last-message.md"),
-            attempt=2,
+            attempt=attempt or 2,
         )
         record.save(root / ".flow" / "runs" / task.id / "run.json")
         return record
@@ -1299,7 +1361,13 @@ def test_retry_all_retries_blocked_flow_tasks(monkeypatch, tmp_path: Path) -> No
     beads.items["bd-2"] = BeadSummary(id="bd-2", title="two", labels=("flow", "blocked"))
     started: list[str] = []
 
-    def fake_start_worker(root: Path, config: object, task: BeadSummary) -> RunRecord:
+    def fake_start_worker(
+        root: Path,
+        config: object,
+        task: BeadSummary,
+        *,
+        attempt: int | None = None,
+    ) -> RunRecord:
         started.append(task.id)
         return RunRecord(
             task_id=task.id,
@@ -1308,6 +1376,7 @@ def test_retry_all_retries_blocked_flow_tasks(monkeypatch, tmp_path: Path) -> No
             prompt=str(root / ".flow" / "runs" / task.id / "prompt.md"),
             result=str(root / ".flow" / "worktrees" / task.id / ".c3x" / "result.json"),
             last_message=str(root / ".flow" / "runs" / task.id / "last-message.md"),
+            attempt=attempt or 1,
         )
 
     monkeypatch.setattr(cli, "_root", lambda: tmp_path)
@@ -2219,6 +2288,7 @@ def test_resolve_conflict_starts_resolver_attempt(monkeypatch, tmp_path: Path) -
         target_branch: str,
         target_revision: str,
         original_result: str,
+        attempt: int | None = None,
     ) -> RunRecord:
         captured.update(
             {
@@ -2226,6 +2296,7 @@ def test_resolve_conflict_starts_resolver_attempt(monkeypatch, tmp_path: Path) -
                 "target_branch": target_branch,
                 "target_revision": target_revision,
                 "original_result": original_result,
+                "attempt": attempt,
             }
         )
         record = RunRecord(
@@ -2235,7 +2306,7 @@ def test_resolve_conflict_starts_resolver_attempt(monkeypatch, tmp_path: Path) -
             prompt=str(tmp_path / ".flow" / "runs" / "bd-1" / "prompt.md"),
             result=str(tmp_path / ".flow" / "runs" / "bd-1" / "result.json"),
             last_message=str(tmp_path / ".flow" / "runs" / "bd-1" / "last-message.md"),
-            attempt=2,
+            attempt=attempt or 2,
         )
         record.save(tmp_path / ".flow" / "runs" / "bd-1" / "run.json")
         return record
@@ -2255,6 +2326,7 @@ def test_resolve_conflict_starts_resolver_attempt(monkeypatch, tmp_path: Path) -
     assert captured["target_branch"] == "main"
     assert captured["target_revision"] == "abc123"
     assert "completed" in str(captured["original_result"])
-    assert (tmp_path / ".flow" / "runs" / "bd-1-attempt-1" / "run.json").exists()
+    assert captured["attempt"] == 2
+    assert (tmp_path / ".flow" / "runs" / "bd-1-attempt-2" / "run.json").exists()
     assert ("bd-1", "in_progress") in beads.statuses
     assert any("conflict-resolver" in labels for task_id, labels in beads.added_labels if task_id == "bd-1")
