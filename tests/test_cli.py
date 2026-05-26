@@ -264,6 +264,7 @@ def test_status_renders_supervisor_activity_and_worker_latest_message(monkeypatc
     cli._write_activity(tmp_path, "dispatching worker bd-3")
     monkeypatch.setattr(cli, "_root", lambda: tmp_path)
     monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "_process_is_running", lambda pid: pid == 1234)
     monkeypatch.setattr(
         cli,
         "load_config",
@@ -277,6 +278,103 @@ def test_status_renders_supervisor_activity_and_worker_latest_message(monkeypatc
     assert "bd-3" in result.stdout
     assert "1234" in result.stdout
     assert "Editing src/c3x/cli.py Running pytest next" in result.stdout
+
+
+def test_status_workers_table_hides_dead_and_non_running_records(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _StatusBeads()
+    live_dir = tmp_path / ".flow" / "runs" / "bd-live"
+    dead_dir = tmp_path / ".flow" / "runs" / "bd-dead"
+    reviewed_dir = tmp_path / ".flow" / "runs" / "bd-reviewed"
+    RunRecord(
+        task_id="bd-live",
+        branch="c3x/bd-live",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "bd-live"),
+        prompt=str(live_dir / "prompt.md"),
+        result=str(live_dir / "result.json"),
+        last_message=str(live_dir / "last-message.md"),
+        pid=111,
+        status="running",
+    ).save(live_dir / "run.json")
+    RunRecord(
+        task_id="bd-dead",
+        branch="c3x/bd-dead",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "bd-dead"),
+        prompt=str(dead_dir / "prompt.md"),
+        result=str(dead_dir / "result.json"),
+        last_message=str(dead_dir / "last-message.md"),
+        pid=222,
+        status="running",
+    ).save(dead_dir / "run.json")
+    RunRecord(
+        task_id="bd-reviewed",
+        branch="c3x/bd-reviewed",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "bd-reviewed"),
+        prompt=str(reviewed_dir / "prompt.md"),
+        result=str(reviewed_dir / "result.json"),
+        last_message=str(reviewed_dir / "last-message.md"),
+        pid=333,
+        status="reviewed",
+    ).save(reviewed_dir / "run.json")
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "_process_is_running", lambda pid: pid == 111)
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda root: type("Config", (), {"limits": type("Limits", (), {"max_parallel_workers": 3})()})(),
+    )
+
+    result = runner.invoke(cli.app, ["status"])
+
+    assert result.exit_code == 0
+    assert "bd-live" in result.stdout
+    assert "111" in result.stdout
+    assert "bd-dead" not in result.stdout
+    assert "222" not in result.stdout
+    assert "bd-reviewed" not in result.stdout
+    assert "333" not in result.stdout
+
+
+def test_live_worker_records_only_returns_running_live_pids(monkeypatch, tmp_path: Path) -> None:
+    live_dir = tmp_path / ".flow" / "runs" / "bd-live"
+    dead_dir = tmp_path / ".flow" / "runs" / "bd-dead"
+    reviewed_dir = tmp_path / ".flow" / "runs" / "bd-reviewed"
+    RunRecord(
+        task_id="bd-live",
+        branch="c3x/bd-live",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "bd-live"),
+        prompt=str(live_dir / "prompt.md"),
+        result=str(live_dir / "result.json"),
+        last_message=str(live_dir / "last-message.md"),
+        pid=111,
+        status="running",
+    ).save(live_dir / "run.json")
+    RunRecord(
+        task_id="bd-dead",
+        branch="c3x/bd-dead",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "bd-dead"),
+        prompt=str(dead_dir / "prompt.md"),
+        result=str(dead_dir / "result.json"),
+        last_message=str(dead_dir / "last-message.md"),
+        pid=222,
+        status="running",
+    ).save(dead_dir / "run.json")
+    RunRecord(
+        task_id="bd-reviewed",
+        branch="c3x/bd-reviewed",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "bd-reviewed"),
+        prompt=str(reviewed_dir / "prompt.md"),
+        result=str(reviewed_dir / "result.json"),
+        last_message=str(reviewed_dir / "last-message.md"),
+        pid=333,
+        status="reviewed",
+    ).save(reviewed_dir / "run.json")
+    monkeypatch.setattr(cli, "_process_is_running", lambda pid: pid == 111)
+
+    records = cli._live_worker_records(tmp_path)
+
+    assert [record.task_id for record in records] == ["bd-live"]
 
 
 def test_blocked_lists_flow_blocked_items_with_reason(monkeypatch, tmp_path: Path) -> None:

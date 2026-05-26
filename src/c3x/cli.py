@@ -772,12 +772,11 @@ def _build_workers_table(root: Path) -> Table:
     table.add_column("PID", justify="right")
     table.add_column("Age")
     table.add_column("Latest")
-    records = _run_records(root)
-    active = [record for record in records if record.status in {"running", "completed", "reviewed"}]
-    if not active:
+    workers = _live_worker_records(root)
+    if not workers:
         table.add_row("-", "idle", "", "", "")
         return table
-    for record in active:
+    for record in workers:
         latest = _one_line(_read_tail(Path(record.last_message), max_chars=180))
         table.add_row(
             record.task_id,
@@ -796,7 +795,7 @@ def _build_status_table(root: Path) -> Table:
     ready_items = beads.ready()
     inbox_items = _with_labels(open_items, {"flow", "inbox", "idea"})
     question_items = _with_labels(open_items, {"flow", "question"})
-    running_items = _with_labels(open_items, {"flow", "running"})
+    running_items = _live_worker_records(root)
     reviewing_items = _with_labels(open_items, {"flow", "reviewing"})
     blocked_items = _with_labels(open_items, {"flow", "blocked"})
 
@@ -1997,6 +1996,16 @@ def _process_is_running(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def _live_worker_records(root: Path) -> list[RunRecord]:
+    return [
+        record
+        for record in _run_records(root)
+        if record.status == "running"
+        and record.pid is not None
+        and _process_is_running(record.pid)
+    ]
 
 
 def _load_worker_result(root: Path, task_id: str) -> WorkerResult:
