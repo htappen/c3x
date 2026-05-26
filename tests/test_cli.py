@@ -1701,6 +1701,89 @@ def test_unstick_defaults_to_dry_run_with_cheap_verification(monkeypatch, tmp_pa
     assert "bd-1" in beads.items
 
 
+def test_unstick_detects_completed_result_for_blocked_task(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="fix",
+        status="in_progress",
+        labels=("flow", "blocked", "blocker-result-missing"),
+    )
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    result_path = worktree / ".c3x" / "result.json"
+    result_path.parent.mkdir(parents=True)
+    result_path.write_text(
+        WorkerResult(task_id="bd-1", status="completed", summary="done").model_dump_json(),
+        encoding="utf-8",
+    )
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(result_path),
+        last_message=str(run_dir / "last-message.md"),
+        status="blocked",
+        outcome="missing-result",
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+
+    result = runner.invoke(cli.app, ["unstick", "bd-1", "--verify", "none"])
+    candidates = cli._unstick_candidates(tmp_path, beads, task_id="bd-1", verify_mode="none")
+
+    assert result.exit_code == 0
+    assert [candidate.action for candidate in candidates] == ["mark-completed-from-result"]
+
+
+def test_unstick_fix_marks_completed_result_reviewing(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="fix",
+        status="in_progress",
+        labels=("flow", "blocked", "blocker-result-missing", "landed"),
+    )
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    result_path = worktree / ".c3x" / "result.json"
+    result_path.parent.mkdir(parents=True)
+    result_path.write_text(
+        WorkerResult(task_id="bd-1", status="completed", summary="done").model_dump_json(),
+        encoding="utf-8",
+    )
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(result_path),
+        last_message=str(run_dir / "last-message.md"),
+        status="blocked",
+        outcome="missing-result",
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+
+    result = runner.invoke(cli.app, ["unstick", "bd-1", "--fix", "--verify", "none"])
+
+    saved = RunRecord.load(run_dir / "run.json")
+    assert result.exit_code == 0
+    assert "Repaired" in result.stdout
+    assert saved.status == "completed"
+    assert saved.outcome == "completed"
+    assert saved.result == str(run_dir / "result.json")
+    assert (run_dir / "result.json").exists()
+    assert ("bd-1", "in_progress") in beads.statuses
+    assert ("bd-1", ["flow", "reviewing", "completed-by-agent"]) in beads.added_labels
+    removed = [labels[0] for item_id, labels in beads.removed_labels if item_id == "bd-1"]
+    assert "blocker-result-missing" in removed
+    assert "landed" in removed
+
+
 def test_unstick_fix_skips_recorded_verification_gap_by_default(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _RecordingBeads()

@@ -1639,6 +1639,22 @@ def _unstick_candidates(root: Path, beads: Beads, *, task_id: str | None, verify
     items = [beads.show(task_id)] if task_id else _with_labels(beads.list_active(), {"flow"})
     candidates: list[UnstickCandidate] = []
     for item in items:
+        completed_evidence = _completed_result_evidence(root, item.id)
+        if completed_evidence is not None and _needs_completed_result_state_repair(item, completed_evidence[0]):
+            record, result = completed_evidence
+            candidates.append(
+                UnstickCandidate(
+                    task_id=item.id,
+                    action="mark-completed-from-result",
+                    reason=f"completed result.json exists at {record.result} but Beads/run state is stale",
+                    record_status=record.status,
+                    bead_status=item.status,
+                    verification_issues=(),
+                    cheap_commands=tuple(command.command for command in result.verification),
+                )
+            )
+            continue
+
         record_path = run_record_path(root, item.id)
         if not record_path.exists():
             continue
@@ -1697,6 +1713,48 @@ def _unstick_candidates(root: Path, beads: Beads, *, task_id: str | None, verify
                 )
             )
     return candidates
+
+
+def _completed_result_evidence(root: Path, task_id: str) -> tuple[RunRecord, WorkerResult] | None:
+    matches: list[tuple[float, RunRecord, WorkerResult]] = []
+    for record_path, record in _run_record_paths(root):
+        if record.task_id != task_id:
+            continue
+        result_path_for_record = _result_file_for_record(record)
+        if not result_path_for_record.exists():
+            continue
+        try:
+            result = WorkerResult.model_validate_json(result_path_for_record.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if result.task_id != task_id or result.status != "completed":
+            continue
+        repaired = record.model_copy(update={"result": str(result_path_for_record)})
+        worktree = _worktree_from_result_path(result_path_for_record)
+        if worktree is not None:
+            repaired = repaired.model_copy(update={"worktree": str(worktree)})
+        matches.append((record_path.stat().st_mtime, repaired, result))
+    if not matches:
+        return None
+    _, record, result = max(matches, key=lambda item: item[0])
+    return record, result
+
+
+def _needs_completed_result_state_repair(item: BeadSummary, record: RunRecord) -> bool:
+    labels = set(item.labels)
+    if "reviewed" in labels:
+        return False
+    if record.status != "completed":
+        return True
+    if item.status != "in_progress":
+        return True
+    if not {"flow", "reviewing", "completed-by-agent"}.issubset(labels):
+        return True
+    if {"blocked", "running", "landed", "rejected", "review-blocked", "land-blocked"}.intersection(labels):
+        return True
+    if any(label.startswith("blocker-") for label in labels):
+        return True
+    return False
 
 
 def _cheap_unstick_verification(root: Path, record: RunRecord) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -1862,6 +1920,29 @@ def _print_unstick_candidates(candidates: list[UnstickCandidate], *, fix: bool) 
 
 def _apply_unstick_candidate(root: Path, beads: Beads, candidate: UnstickCandidate) -> None:
     record = RunRecord.load(run_record_path(root, candidate.task_id))
+    item = beads.show(candidate.task_id)
+    if candidate.action == "mark-completed-from-result":
+        evidence = _completed_result_evidence(root, candidate.task_id)
+        if evidence is None:
+            raise ValueError(f"{candidate.task_id} has no completed result.json evidence")
+        evidence_record, result = evidence
+        result_text = Path(evidence_record.result).read_text(encoding="utf-8")
+        _save_canonical_result(root, candidate.task_id, result_text)
+        beads.add_note(candidate.task_id, f"c3x unstick recovered completed result: {result.summary}")
+        beads.set_status(candidate.task_id, "in_progress")
+        beads.add_labels(candidate.task_id, ["flow", "reviewing", "completed-by-agent"])
+        for label in _completed_result_removed_labels(item):
+            beads.remove_labels(candidate.task_id, [label])
+        record = evidence_record.model_copy(
+            update={
+                "result": str(result_path(root, candidate.task_id)),
+                "status": "completed",
+                "outcome": "completed",
+                "finished_at": evidence_record.finished_at or _now(),
+            }
+        )
+        record.save(run_record_path(root, candidate.task_id))
+        return
     if candidate.action == "mark-reviewed":
         beads.add_note(candidate.task_id, "c3x unstick repaired stale review state")
         beads.add_labels(candidate.task_id, ["reviewed", "reviewing"])
@@ -1880,6 +1961,19 @@ def _apply_unstick_candidate(root: Path, beads: Beads, candidate: UnstickCandida
         record.save(run_record_path(root, candidate.task_id))
         return
     raise ValueError(f"unknown unstick action: {candidate.action}")
+
+
+def _completed_result_removed_labels(item: BeadSummary) -> list[str]:
+    labels = {
+        "running",
+        "blocked",
+        "landed",
+        "rejected",
+        "review-blocked",
+        "land-blocked",
+    }
+    labels.update(label for label in item.labels if label.startswith("blocker-"))
+    return sorted(labels)
 
 
 def _maybe_warn_stuck(root: Path, beads: Beads) -> None:
