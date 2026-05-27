@@ -250,7 +250,7 @@ def test_inbox_uses_same_active_items_as_status(monkeypatch, tmp_path: Path) -> 
     assert "triage me" in result.stdout
 
 
-def test_status_renders_bucket_counts(monkeypatch, tmp_path: Path) -> None:
+def test_status_renders_workflow_counts(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _StatusBeads()
     monkeypatch.setattr(cli, "_root", lambda: tmp_path)
@@ -264,12 +264,13 @@ def test_status_renders_bucket_counts(monkeypatch, tmp_path: Path) -> None:
     result = runner.invoke(cli.app, ["status"])
 
     assert result.exit_code == 0
-    assert "c3x activity" in result.stdout
-    assert "Supervisor" in result.stdout
-    assert "Inbox" in result.stdout
-    assert "Questions" in result.stdout
-    assert "Max parallel workers" in result.stdout
-    assert "Ready to land" in result.stdout
+    assert "c3x supervisor" in result.stdout
+    assert "c3x workflow" in result.stdout
+    assert "submitted" in result.stdout
+    assert "questions" in result.stdout
+    assert "max parallel workers" in result.stdout
+    assert "land" in result.stdout
+    assert "open c3x items" in result.stdout
     assert "3" in result.stdout
 
 
@@ -298,10 +299,39 @@ def test_status_reviewing_count_excludes_reviewed_and_land_blocked(monkeypatch, 
     result = runner.invoke(cli.app, ["status"])
 
     assert result.exit_code == 0
-    assert "Reviewing" in result.stdout
-    assert "Ready to land" in result.stdout
+    assert "review" in result.stdout
+    assert "land" in result.stdout
     assert cli._reviewing_items(list(beads.items.values())) == [beads.items["bd-review"]]
     assert cli._ready_to_land_items(list(beads.items.values())) == [beads.items["bd-land"]]
+
+
+def test_workflow_rows_classify_every_active_flow_item_once(monkeypatch, tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-inbox"] = BeadSummary(id="bd-inbox", title="idea", labels=("flow", "inbox", "idea"))
+    beads.items["bd-question"] = BeadSummary(
+        id="bd-question",
+        title="question",
+        labels=("flow", "question", "needs-human-clarification"),
+    )
+    beads.items["bd-ready"] = BeadSummary(id="bd-ready", title="queued", labels=("flow", "ready"))
+    beads.items["bd-review"] = BeadSummary(id="bd-review", title="review", labels=("flow", "reviewing"))
+    beads.items["bd-land"] = BeadSummary(id="bd-land", title="land", labels=("flow", "reviewing", "reviewed"))
+    beads.items["bd-blocked"] = BeadSummary(id="bd-blocked", title="blocked", labels=("flow", "blocked"))
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda root: type("Config", (), {"limits": type("Limits", (), {"max_parallel_workers": 2})()})(),
+    )
+
+    rows = cli._workflow_rows(tmp_path, beads.list_active(), beads.ready())
+
+    total_row = rows[-1]
+    state_rows = [row for row in rows if row.state not in {"total", "capacity"}]
+    assert total_row.count == 6
+    assert sum(row.count for row in state_rows) == total_row.count
+    queued = next(row for row in rows if row.stage == "queued")
+    assert queued.count == 1
+    assert "worker slots available" in queued.detail
 
 
 def test_status_renders_supervisor_activity_and_worker_latest_message(monkeypatch, tmp_path: Path) -> None:
@@ -376,6 +406,71 @@ def test_status_renders_captured_codex_status(monkeypatch, tmp_path: Path) -> No
     assert result.exit_code == 0
     assert "codex /status" in result.stdout
     assert "Model: gpt-5.4-mini Context: 12k / 50k" in result.stdout
+
+
+def test_status_renders_usage_limit_fallback_for_blocked_worker(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-usage"] = BeadSummary(id="bd-usage", title="blocked", labels=("flow", "blocked"))
+    run_dir = tmp_path / ".flow" / "runs" / "bd-usage"
+    stderr = run_dir / "stderr.log"
+    stderr.parent.mkdir(parents=True)
+    stderr.write_text("ERROR: You've hit your usage limit. Try again later.", encoding="utf-8")
+    RunRecord(
+        task_id="bd-usage",
+        branch="c3x/bd-usage",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "bd-usage"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="blocked",
+        pid=1234,
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda root: type("Config", (), {"limits": type("Limits", (), {"max_parallel_workers": 3})()})(),
+    )
+
+    result = runner.invoke(cli.app, ["status"])
+
+    assert result.exit_code == 0
+    assert "bd-usage" in result.stdout
+    assert "Codex usage limit evidence" in result.stdout
+
+
+def test_status_hides_provider_logs_for_closed_records(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    run_dir = tmp_path / ".flow" / "runs" / "bd-closed"
+    stderr = run_dir / "stderr.log"
+    stderr.parent.mkdir(parents=True)
+    stderr.write_text("ERROR: You've hit your usage limit. Try again later.", encoding="utf-8")
+    RunRecord(
+        task_id="bd-closed",
+        branch="c3x/bd-closed",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "bd-closed"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="blocked",
+        pid=1234,
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda root: type("Config", (), {"limits": type("Limits", (), {"max_parallel_workers": 3})()})(),
+    )
+
+    result = runner.invoke(cli.app, ["status"])
+
+    assert result.exit_code == 0
+    assert "bd-closed" not in result.stdout
+    assert "no captured /status output" in result.stdout
 
 
 def test_status_renders_captured_antigravity_status(monkeypatch, tmp_path: Path) -> None:
@@ -606,7 +701,11 @@ def test_supervisor_tick_records_critic_outcome(monkeypatch, tmp_path: Path) -> 
     cli._supervisor_tick(tmp_path, dispatch=False)
 
     activity = cli._read_activity(tmp_path)
-    assert activity["supervisor"] == "tick complete; critic tasks OK"
+    assert activity["supervisor"] == (
+        "tick complete; dispatch disabled; use c3x run --dispatch or c3x watch to start workers"
+    )
+    events = cli._activity_events(activity)
+    assert any(event["event"] == "checking critic tasks" and event["detail"] == "critic tasks OK" for event in events)
 
 
 def test_answer_marks_blocking_item_clarified(monkeypatch, tmp_path: Path) -> None:

@@ -90,6 +90,14 @@ class UnstickCandidate:
     cheap_commands: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class WorkflowRow:
+    state: str
+    stage: str
+    count: int
+    detail: str
+
+
 def _root() -> Path:
     return Path.cwd()
 
@@ -658,6 +666,10 @@ def kill_workers(
 @app.command()
 def unstick(
     task_id: Annotated[str | None, typer.Argument(help="Optional task id to inspect or repair.")] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run/--no-dry-run", help="Show repair candidates without applying changes."),
+    ] = True,
     fix: Annotated[bool, typer.Option("--fix", help="Apply high-confidence repairs.")] = False,
     verify_mode: Annotated[
         str,
@@ -670,6 +682,8 @@ def unstick(
 ) -> None:
     """Detect and repair stale c3x worker/Beads state."""
     root = _root()
+    if fix:
+        dry_run = False
     if verify_mode not in {"cheap", "none"}:
         raise typer.Exit(_error("--verify must be cheap or none"))
     try:
@@ -678,8 +692,8 @@ def unstick(
         if not candidates:
             console.print("[green]No stuck c3x state detected.[/green]")
             return
-        _print_unstick_candidates(candidates, fix=fix)
-        if not fix:
+        _print_unstick_candidates(candidates, fix=not dry_run)
+        if dry_run:
             console.print("[yellow]Dry run only.[/yellow] Re-run with --fix to apply eligible repairs.")
             return
         for candidate in candidates:
@@ -788,25 +802,33 @@ def _status_live(view: Group) -> Live:
 
 def _build_status_view(root: Path) -> Group:
     return Group(
-        _build_activity_table(root),
+        _build_supervisor_table(root),
         _build_status_table(root),
+        _build_unstick_table(root),
         _build_codex_status_table(root),
         _build_workers_table(root),
     )
 
 
-def _build_activity_table(root: Path) -> Table:
+def _build_supervisor_table(root: Path) -> Table:
     activity = _read_activity(root)
-    supervisor = activity.get("supervisor") or "idle; no supervisor activity recorded"
-    updated_at = activity.get("updated_at") or ""
-    age = _age_label(updated_at) if updated_at else ""
+    events = _activity_events(activity)
 
-    table = Table(title="c3x activity")
-    table.add_column("Actor")
-    table.add_column("Activity")
-    table.add_column("Updated")
-    table.add_row("Supervisor", supervisor, age)
+    table = Table(title="c3x supervisor")
+    table.add_column("Age")
+    table.add_column("Event")
+    table.add_column("Detail")
+    if not events:
+        table.add_row("", "idle", "no supervisor activity recorded")
+        return table
+    for event in events[:10]:
+        updated_at = event.get("updated_at", "")
+        table.add_row(_age_label(updated_at) if updated_at else "", event.get("event", ""), event.get("detail", ""))
     return table
+
+
+def _build_activity_table(root: Path) -> Table:
+    return _build_supervisor_table(root)
 
 
 def _build_workers_table(root: Path) -> Table:
@@ -835,18 +857,38 @@ def _build_workers_table(root: Path) -> Table:
 def _build_codex_status_table(root: Path) -> Table:
     config = load_config(root)
     provider = getattr(getattr(config, "agents", None), "provider", "codex")
+    active_ids = {item.id for item in _with_labels(_beads(root).list_active(), {"flow"})}
     table = Table(title=f"{provider} /status")
     table.add_column("Task")
     table.add_column("Latest")
     rows = 0
-    for record in _live_worker_records(root):
-        status = _codex_status_for_record(record)
+    for record in _provider_status_records(root, active_ids=active_ids):
+        status = _codex_status_for_record(record) or _worker_status_fallback(record)
         if status:
             table.add_row(record.task_id, status)
             rows += 1
     if rows == 0:
         table.add_row("-", "no captured /status output")
     return table
+
+
+def _provider_status_records(root: Path, *, active_ids: set[str]) -> list[RunRecord]:
+    records: list[RunRecord] = []
+    seen: set[str] = set()
+    for record in _live_worker_records(root):
+        if record.task_id not in active_ids:
+            continue
+        records.append(record)
+        seen.add(record.task_id)
+    for record in _canonical_run_records(root):
+        if record.task_id not in active_ids:
+            continue
+        if record.task_id in seen or record.status not in {"running", "blocked", "failed"}:
+            continue
+        if _codex_status_for_record(record) or _worker_status_fallback(record):
+            records.append(record)
+            seen.add(record.task_id)
+    return records[:10]
 
 
 def _codex_status_for_record(record: RunRecord) -> str:
@@ -859,6 +901,24 @@ def _codex_status_for_record(record: RunRecord) -> str:
         ]
     )
     return _extract_codex_status(text)
+
+
+def _worker_status_fallback(record: RunRecord) -> str:
+    run_dir = Path(record.prompt).parent
+    text = "\n".join(
+        [
+            _read_tail(Path(record.last_message), max_chars=4000),
+            _read_tail(run_dir / "stderr.log", max_chars=12000),
+            _read_tail(run_dir / "stdout.log", max_chars=12000),
+        ]
+    )
+    if _has_usage_limit_evidence(text):
+        return "no /status captured; Codex usage limit evidence in worker logs"
+    if "rate limit" in text.lower() or "429" in text:
+        return "no /status captured; Codex rate limit evidence in worker logs"
+    if text.strip():
+        return "no /status captured; latest worker output exists"
+    return ""
 
 
 def _extract_codex_status(text: str) -> str:
@@ -893,27 +953,114 @@ def _build_status_table(root: Path) -> Table:
     config = load_config(root)
     beads = _beads(root)
     open_items = beads.list_active()
-    ready_items = beads.ready()
-    inbox_items = _with_labels(open_items, {"flow", "inbox", "idea"})
-    question_items = _with_labels(open_items, {"flow", "question"})
-    running_items = _live_worker_records(root)
-    reviewing_items = _reviewing_items(open_items)
-    ready_to_land_items = _ready_to_land_items(open_items)
-    blocked_items = _with_labels(open_items, {"flow", "blocked"})
+    rows = _workflow_rows(root, open_items, beads.ready())
 
-    table = Table(title="c3x status")
-    table.add_column("Bucket")
+    table = Table(title="c3x workflow")
+    table.add_column("State")
+    table.add_column("Stage")
     table.add_column("Count", justify="right")
-    table.add_row("Inbox", str(len(inbox_items)))
-    table.add_row("Questions", str(len(question_items)))
-    table.add_row("Active", str(len(open_items)))
-    table.add_row("Ready", str(len(ready_items)))
-    table.add_row("Running", str(len(running_items)))
-    table.add_row("Reviewing", str(len(reviewing_items)))
-    table.add_row("Ready to land", str(len(ready_to_land_items)))
-    table.add_row("Blocked", str(len(blocked_items)))
-    table.add_row("Max parallel workers", str(config.limits.max_parallel_workers))
+    table.add_column("Detail")
+    for row in rows:
+        table.add_row(row.state, row.stage, str(row.count), row.detail)
+    table.add_row("capacity", "workers", str(config.limits.max_parallel_workers), "max parallel workers")
     return table
+
+
+def _build_unstick_table(root: Path) -> Table:
+    candidates: list[UnstickCandidate] = []
+    try:
+        candidates = _unstick_candidates(root, _beads(root), task_id=None, verify_mode="none")
+    except (BeadsError, ValueError):
+        candidates = []
+    table = Table(title="c3x unstick --dry-run")
+    table.add_column("Task")
+    table.add_column("Would")
+    table.add_column("Reason")
+    if not candidates:
+        table.add_row("-", "no repair needed", "")
+        return table
+    for candidate in candidates[:10]:
+        table.add_row(candidate.task_id, candidate.action, candidate.reason)
+    return table
+
+
+def _workflow_rows(root: Path, open_items: list[BeadSummary], ready_items: list[BeadSummary]) -> list[WorkflowRow]:
+    config = load_config(root)
+    live_workers = _live_worker_records(root)
+    live_task_ids = {record.task_id for record in live_workers}
+    canonical_records = {record.task_id: record for record in _canonical_run_records(root)}
+    ready_ids = {item.id for item in ready_items if "flow" in item.labels}
+    flow_items = [item for item in open_items if "flow" in item.labels]
+    classified: dict[tuple[str, str], list[BeadSummary]] = {}
+    for item in flow_items:
+        key = _workflow_key(item, ready_ids=ready_ids, live_task_ids=live_task_ids, records=canonical_records)
+        classified.setdefault(key, []).append(item)
+
+    worker_slots = max(config.limits.max_parallel_workers - len(live_workers), 0)
+    queued_count = len(classified.get(("not picked up", "queued"), []))
+    queued_detail = "planned and waiting for supervisor"
+    if queued_count and worker_slots:
+        queued_detail = f"worker slots available: {worker_slots}; supervisor should dispatch"
+    elif queued_count:
+        queued_detail = "waiting for worker capacity"
+    rows = [
+        _workflow_row(classified, "not picked up", "submitted", "waiting for supervisor triage"),
+        _workflow_row(classified, "not picked up", "questions", "waiting for human answer"),
+        _workflow_row(
+            classified,
+            "not picked up",
+            "queued",
+            queued_detail,
+        ),
+        _workflow_row(classified, "being worked", "worker", "live worker process"),
+        _workflow_row(classified, "being worked", "review", "worker done; review pending"),
+        _workflow_row(classified, "being worked", "land", "review passed; merge pending"),
+        _workflow_row(classified, "blocked", "blocked", "needs retry, unstick, or human action"),
+        _workflow_row(classified, "unknown", "needs sync", "active Beads item does not match c3x labels"),
+    ]
+    rows.append(WorkflowRow("total", "open c3x items", len(flow_items), "sum of states above"))
+    return rows
+
+
+def _workflow_key(
+    item: BeadSummary,
+    *,
+    ready_ids: set[str],
+    live_task_ids: set[str],
+    records: dict[str, RunRecord],
+) -> tuple[str, str]:
+    labels = set(item.labels)
+    record = records.get(item.id)
+    if "blocked" in labels or item.status == "blocked" or (record is not None and record.status == "blocked"):
+        return ("blocked", "blocked")
+    if "question" in labels or "needs-human-clarification" in labels:
+        return ("not picked up", "questions")
+    if "inbox" in labels or "idea" in labels or "unreviewed" in labels:
+        return ("not picked up", "submitted")
+    if item.id in live_task_ids:
+        return ("being worked", "worker")
+    if "reviewed" in labels or (record is not None and record.status == "reviewed"):
+        return ("being worked", "land")
+    if "reviewing" in labels or "completed-by-agent" in labels or (record is not None and record.status == "completed"):
+        return ("being worked", "review")
+    if "running" in labels:
+        return ("blocked", "blocked")
+    if item.id in ready_ids or "ready" in labels:
+        return ("not picked up", "queued")
+    return ("unknown", "needs sync")
+
+
+def _workflow_row(
+    classified: dict[tuple[str, str], list[BeadSummary]],
+    state: str,
+    stage: str,
+    detail: str,
+) -> WorkflowRow:
+    items = classified.get((state, stage), [])
+    ids = ", ".join(item.id for item in items[:4])
+    extra = "" if len(items) <= 4 else f" +{len(items) - 4}"
+    suffix = f": {ids}{extra}" if ids else ""
+    return WorkflowRow(state, stage, len(items), f"{detail}{suffix}")
 
 
 def _reviewing_items(items: list[BeadSummary]) -> list[BeadSummary]:
@@ -933,15 +1080,31 @@ def _ready_to_land_items(items: list[BeadSummary]) -> list[BeadSummary]:
 
 
 def _write_activity(root: Path, supervisor: str) -> None:
+    _write_activity_event(root, supervisor, "")
+
+
+def _write_activity_event(root: Path, event: str, detail: str = "") -> None:
     path = activity_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
+    updated_at = _now()
+    events = _activity_events(_read_activity(root))
+    events.insert(0, {"event": event, "detail": detail, "updated_at": updated_at})
+    events = events[:10]
     path.write_text(
-        json.dumps({"supervisor": supervisor, "updated_at": _now()}, indent=2) + "\n",
+        json.dumps(
+            {
+                "supervisor": event if not detail else f"{event}; {detail}",
+                "updated_at": updated_at,
+                "events": events,
+            },
+            indent=2,
+        )
+        + "\n",
         encoding="utf-8",
     )
 
 
-def _read_activity(root: Path) -> dict[str, str]:
+def _read_activity(root: Path) -> dict[str, object]:
     path = activity_path(root)
     if not path.exists():
         return {}
@@ -949,7 +1112,30 @@ def _read_activity(root: Path) -> dict[str, str]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {"supervisor": "activity state is unreadable", "updated_at": ""}
-    return {key: value for key, value in data.items() if isinstance(key, str) and isinstance(value, str)}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def _activity_events(activity: dict[str, object]) -> list[dict[str, str]]:
+    raw_events = activity.get("events")
+    events: list[dict[str, str]] = []
+    if isinstance(raw_events, list):
+        for raw_event in raw_events:
+            if not isinstance(raw_event, dict):
+                continue
+            event = raw_event.get("event")
+            updated_at = raw_event.get("updated_at")
+            detail = raw_event.get("detail", "")
+            if isinstance(event, str) and isinstance(updated_at, str) and isinstance(detail, str):
+                events.append({"event": event, "detail": detail, "updated_at": updated_at})
+    if events:
+        return events
+    supervisor = activity.get("supervisor")
+    updated_at = activity.get("updated_at")
+    if isinstance(supervisor, str) and isinstance(updated_at, str):
+        return [{"event": supervisor, "detail": "", "updated_at": updated_at}]
+    return []
 
 
 def _age_label(timestamp: str) -> str:
@@ -992,19 +1178,25 @@ def _supervisor_tick(
     _plan_inbox(root, beads)
     _write_activity(root, "checking critic tasks")
     critic_activity = _critic_tick(beads)
-    _write_activity(root, f"checking critic tasks; {critic_activity}")
+    _write_activity_event(root, "checking critic tasks", critic_activity)
     if dispatch:
         _write_activity(root, "checking worker capacity")
         config = load_config(root)
-        running = len(_with_labels(beads.list_active(), {"flow", "running"}))
+        running = len(_live_worker_records(root))
         slots = max(config.limits.max_parallel_workers - running, 0)
-        for task in beads.ready()[:slots]:
+        dispatched = 0
+        for task in beads.ready():
+            if dispatched >= slots:
+                break
             if "flow" in task.labels:
                 _write_activity(root, f"dispatching worker {task.id}")
                 start_worker(root, config, task)
                 beads.set_status(task.id, "in_progress")
                 beads.add_labels(task.id, ["flow", "running"])
                 beads.remove_labels(task.id, ["ready", "blocked", "reviewing"])
+                dispatched += 1
+        if dispatched == 0:
+            _write_activity_event(root, "not dispatching", _supervisor_idle_reason(root, beads, dispatch=True))
     if review:
         _write_activity(root, "reviewing completed work")
         _auto_review(root, beads)
@@ -1014,12 +1206,52 @@ def _supervisor_tick(
     if resolve_conflicts:
         _write_activity(root, "checking merge-conflict blockers")
         config = load_config(root)
+        resolved = 0
         for item_id in _conflict_task_ids(beads, task_id=None, all_tasks=True):
             _write_activity(root, f"starting conflict resolver {item_id}")
             _resolve_conflict_task(root, config, beads, item_id)
+            resolved += 1
             console.print(f"[green]Conflict resolver started[/green] {item_id}")
+        if resolved == 0:
+            _write_activity_event(root, "not resolving conflicts", "no merge-conflict blockers waiting")
     _maybe_warn_stuck(root, beads)
-    _write_activity(root, f"tick complete; {critic_activity}")
+    _write_activity_event(root, "tick complete", _supervisor_idle_reason(root, beads, dispatch=dispatch))
+
+
+def _supervisor_idle_reason(root: Path, beads: Beads, *, dispatch: bool) -> str:
+    if not dispatch:
+        return "dispatch disabled; use c3x run --dispatch or c3x watch to start workers"
+    config = load_config(root)
+    active = _with_labels(beads.list_active(), {"flow"})
+    live_workers = _live_worker_records(root)
+    if len(live_workers) >= config.limits.max_parallel_workers:
+        return f"worker capacity full: {len(live_workers)}/{config.limits.max_parallel_workers}"
+    unstick_candidates = _unstick_candidates(root, beads, task_id=None, verify_mode="none")
+    if unstick_candidates:
+        first = unstick_candidates[0]
+        return f"stale state detected; run c3x unstick --dry-run ({first.task_id}: {first.action})"
+    flow_ready = [item for item in beads.ready() if "flow" in item.labels]
+    if flow_ready:
+        slots = max(config.limits.max_parallel_workers - len(live_workers), 0)
+        return f"{len(flow_ready)} queued task(s), {slots} worker slot(s)"
+    blocked = _with_labels(active, {"blocked"})
+    questions = _with_labels(active, {"question", "needs-human-clarification"})
+    inbox = _with_labels(active, {"inbox", "idea"})
+    reviewing = _reviewing_items(active)
+    landing = _ready_to_land_items(active)
+    if active and len(blocked) == len(active):
+        return f"all {len(blocked)} flow item(s) blocked"
+    if questions:
+        return f"{len(questions)} question(s) need human answers"
+    if inbox:
+        return f"{len(inbox)} inbox item(s) awaiting supervisor planning"
+    if reviewing:
+        return f"{len(reviewing)} item(s) awaiting review"
+    if landing:
+        return f"{len(landing)} item(s) awaiting land"
+    if blocked:
+        return f"{len(blocked)} blocked item(s); no queued worker task"
+    return "no queued work"
 
 
 def _plan_inbox(root: Path, beads: Beads) -> None:
@@ -1874,6 +2106,16 @@ def _unstick_candidates(root: Path, beads: Beads, *, task_id: str | None, verify
 
         record_path = run_record_path(root, item.id)
         if not record_path.exists():
+            if "running" in item.labels:
+                candidates.append(
+                    UnstickCandidate(
+                        task_id=item.id,
+                        action="mark-blocked-missing-run-record",
+                        reason="Beads says running but no canonical run.json exists",
+                        record_status="missing",
+                        bead_status=item.status,
+                    )
+                )
             continue
         record = RunRecord.load(record_path)
         stale_running = "running" in item.labels and (
@@ -2180,6 +2422,11 @@ def _apply_unstick_candidate(root: Path, beads: Beads, candidate: UnstickCandida
         if record.finished_at is None:
             record.finished_at = _now()
         record.save(run_record_path(root, candidate.task_id))
+        return
+    if candidate.action == "mark-blocked-missing-run-record":
+        beads.add_note(candidate.task_id, "c3x unstick found stale running state with no canonical run.json")
+        beads.add_labels(candidate.task_id, ["flow", "blocked", "blocker-run-record-missing"])
+        beads.remove_labels(candidate.task_id, ["running", "reviewing"])
         return
     raise ValueError(f"unknown unstick action: {candidate.action}")
 
