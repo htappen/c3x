@@ -1158,7 +1158,7 @@ def _conflict_task_ids(beads: Beads, *, task_id: str | None, all_tasks: bool) ->
             raise ValueError(f"{task_id} is not blocked on a merge conflict")
         return [task_id]
     blocked = _with_labels(beads.list_active(), {"flow", "land-blocked", "blocker-merge-conflict"})
-    return [item.id for item in blocked]
+    return [item.id for item in blocked if "running" not in item.labels]
 
 
 def _retry_task(

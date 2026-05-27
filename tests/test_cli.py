@@ -2408,3 +2408,19 @@ def test_resolve_conflict_starts_resolver_attempt(monkeypatch, tmp_path: Path) -
     assert WorkerResult.model_validate_json(seeded.read_text(encoding="utf-8")).status == "completed"
     assert ("bd-1", "in_progress") in beads.statuses
     assert any("conflict-resolver" in labels for task_id, labels in beads.added_labels if task_id == "bd-1")
+
+
+def test_conflict_task_ids_skip_running_stale_land_blockers() -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-running"] = BeadSummary(
+        id="bd-running",
+        title="running retry",
+        labels=("flow", "running", "land-blocked", "blocker-merge-conflict"),
+    )
+    beads.items["bd-blocked"] = BeadSummary(
+        id="bd-blocked",
+        title="blocked conflict",
+        labels=("flow", "land-blocked", "blocker-merge-conflict"),
+    )
+
+    assert cli._conflict_task_ids(beads, task_id=None, all_tasks=True) == ["bd-blocked"]
