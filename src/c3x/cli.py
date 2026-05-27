@@ -587,11 +587,25 @@ def cleanup(
     """Remove landed task worktrees and superseded stale attempts."""
     root = _root()
     try:
+        beads: Beads | None = None
+        try:
+            beads = _beads(root)
+        except BeadsError:
+            if repair_beads:
+                raise
         if repair_beads:
-            _repair_large_beads_payloads(root, _beads(root), task_id=task_id, dry_run=dry_run)
-        actions = _cleanup_actions(root, task_id=task_id, require_task_cleanup=not repair_beads)
+            assert beads is not None
+            _repair_large_beads_payloads(root, beads, task_id=task_id, dry_run=dry_run)
+        try:
+            reconciled = _cleanup_reconcile_labels(root, beads, task_id=task_id, dry_run=dry_run) if beads else 0
+        except BeadsError:
+            if repair_beads:
+                raise
+            reconciled = 0
+        actions = _cleanup_actions(root, task_id=task_id, require_task_cleanup=not repair_beads and not reconciled)
         if not actions:
-            console.print("[green]Nothing to clean.[/green]")
+            if not reconciled:
+                console.print("[green]Nothing to clean.[/green]")
             return
         for action in actions:
             if dry_run:
@@ -1713,6 +1727,67 @@ def _compact_excerpt(text: str, *, limit: int) -> str:
     if len(normalized) <= limit:
         return normalized
     return normalized[: limit - 3].rstrip() + "..."
+
+
+def _cleanup_reconcile_labels(root: Path, beads: Beads, *, task_id: str | None, dry_run: bool) -> int:
+    items = [beads.show(task_id)] if task_id else _with_labels(beads.list_active(), {"flow"})
+    changes = 0
+    for item in items:
+        labels = set(item.labels)
+        record = _current_run_record(root, item.id)
+        if record is not None and record.status == "running" and "running" in labels:
+            stale = _stale_labels_for_running_task(labels)
+            if stale:
+                message = f"{item.id}: remove stale labels {', '.join(stale)}"
+                if dry_run:
+                    console.print(f"[yellow]Would reconcile labels[/yellow] {message}")
+                else:
+                    beads.remove_labels(item.id, stale)
+                    console.print(f"[green]Reconciled labels[/green] {message}")
+                changes += 1
+            continue
+
+        groups = _label_state_groups(labels)
+        if len(groups) > 1:
+            console.print(
+                f"[yellow]Label conflict[/yellow] {item.id}: {', '.join(groups)}. "
+                f"Recommended: c3x retry {item.id} --fresh"
+            )
+            changes += 1
+    return changes
+
+
+def _stale_labels_for_running_task(labels: set[str]) -> list[str]:
+    stale = {
+        "blocked",
+        "reviewing",
+        "reviewed",
+        "completed-by-agent",
+        "conflict-resolver",
+        "rejected",
+        "review-blocked",
+        "land-blocked",
+        "landed",
+    }
+    stale.update(label for label in labels if label.startswith("blocker-"))
+    return sorted(stale.intersection(labels))
+
+
+def _label_state_groups(labels: set[str]) -> list[str]:
+    groups: list[str] = []
+    if "ready" in labels:
+        groups.append("ready")
+    if "running" in labels:
+        groups.append("running")
+    if {"reviewing", "reviewed", "completed-by-agent"}.intersection(labels):
+        groups.append("review")
+    if {"blocked", "land-blocked", "review-blocked", "rejected"}.intersection(labels) or any(
+        label.startswith("blocker-") for label in labels
+    ):
+        groups.append("blocked")
+    if "landed" in labels:
+        groups.append("landed")
+    return groups
 
 
 def _is_superseded_attempt(record: RunRecord, current: RunRecord | None) -> bool:

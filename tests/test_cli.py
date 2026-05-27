@@ -1944,6 +1944,65 @@ def test_cleanup_repair_beads_allows_non_landed_target(monkeypatch, tmp_path: Pa
     assert beads.compacted[0][0] == "bd-1"
 
 
+def test_cleanup_reconciles_running_retry_labels(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="retry",
+        status="in_progress",
+        labels=("flow", "running", "land-blocked", "blocker-merge-conflict", "reviewed"),
+    )
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix-attempt-3",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-3"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-3" / ".c3x" / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="running",
+        attempt=3,
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+
+    result = runner.invoke(cli.app, ["cleanup", "bd-1"])
+
+    assert result.exit_code == 0
+    assert "Reconciled labels" in result.stdout
+    assert ("bd-1", ["blocker-merge-conflict", "land-blocked", "reviewed"]) in beads.removed_labels
+
+
+def test_cleanup_recommends_fresh_retry_for_conflicting_labels(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="confused",
+        status="in_progress",
+        labels=("flow", "reviewed", "land-blocked", "blocker-merge-conflict"),
+    )
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="blocked",
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+
+    result = runner.invoke(cli.app, ["cleanup", "bd-1"])
+
+    assert result.exit_code == 0
+    assert "Label conflict" in result.stdout
+    assert "c3x retry bd-1 --fresh" in result.stdout
+
+
 def test_unstick_defaults_to_dry_run_with_cheap_verification(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _RecordingBeads()
