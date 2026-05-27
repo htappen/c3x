@@ -1730,11 +1730,22 @@ def _compact_excerpt(text: str, *, limit: int) -> str:
 
 
 def _cleanup_reconcile_labels(root: Path, beads: Beads, *, task_id: str | None, dry_run: bool) -> int:
-    items = [beads.show(task_id)] if task_id else _with_labels(beads.list_active(), {"flow"})
+    items = _cleanup_reconcile_items(root, beads, task_id=task_id)
     changes = 0
     for item in items:
         labels = set(item.labels)
         record = _current_run_record(root, item.id)
+        if record is not None and record.status == "landed" and "landed" in labels:
+            stale = _stale_labels_for_landed_task(labels)
+            if stale:
+                message = f"{item.id}: remove stale labels {', '.join(stale)}"
+                if dry_run:
+                    console.print(f"[yellow]Would reconcile labels[/yellow] {message}")
+                else:
+                    beads.remove_labels(item.id, stale)
+                    console.print(f"[green]Reconciled labels[/green] {message}")
+                changes += 1
+            continue
         if record is not None and record.status == "running" and "running" in labels:
             stale = _stale_labels_for_running_task(labels)
             if stale:
@@ -1757,6 +1768,22 @@ def _cleanup_reconcile_labels(root: Path, beads: Beads, *, task_id: str | None, 
     return changes
 
 
+def _cleanup_reconcile_items(root: Path, beads: Beads, *, task_id: str | None) -> list[BeadSummary]:
+    if task_id:
+        return [beads.show(task_id)]
+    by_id = {item.id: item for item in _with_labels(beads.list_active(), {"flow"})}
+    for _, record in _canonical_run_record_paths(root):
+        if record.status != "landed" or record.task_id in by_id:
+            continue
+        try:
+            item = beads.show(record.task_id)
+        except BeadsError:
+            continue
+        if "flow" in item.labels:
+            by_id[item.id] = item
+    return list(by_id.values())
+
+
 def _stale_labels_for_running_task(labels: set[str]) -> list[str]:
     stale = {
         "blocked",
@@ -1768,6 +1795,23 @@ def _stale_labels_for_running_task(labels: set[str]) -> list[str]:
         "review-blocked",
         "land-blocked",
         "landed",
+    }
+    stale.update(label for label in labels if label.startswith("blocker-"))
+    return sorted(stale.intersection(labels))
+
+
+def _stale_labels_for_landed_task(labels: set[str]) -> list[str]:
+    stale = {
+        "blocked",
+        "ready",
+        "running",
+        "reviewing",
+        "reviewed",
+        "completed-by-agent",
+        "conflict-resolver",
+        "rejected",
+        "review-blocked",
+        "land-blocked",
     }
     stale.update(label for label in labels if label.startswith("blocker-"))
     return sorted(stale.intersection(labels))

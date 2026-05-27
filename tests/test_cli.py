@@ -2003,6 +2003,38 @@ def test_cleanup_recommends_fresh_retry_for_conflicting_labels(monkeypatch, tmp_
     assert "c3x retry bd-1 --fresh" in result.stdout
 
 
+def test_cleanup_reconciles_landed_labels(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="landed",
+        status="closed",
+        labels=("flow", "landed", "land-blocked", "blocker-merge-conflict", "reviewed"),
+    )
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="landed",
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "is_ancestor", lambda root, ancestor, descendant: True)
+    monkeypatch.setattr(cli, "remove_worktree", lambda root, path, force=False: None)
+    monkeypatch.setattr(cli, "delete_branch", lambda root, branch, force=False: None)
+
+    result = runner.invoke(cli.app, ["cleanup"])
+
+    assert result.exit_code == 0
+    assert "Reconciled labels" in result.stdout
+    assert ("bd-1", ["blocker-merge-conflict", "land-blocked", "reviewed"]) in beads.removed_labels
+
+
 def test_unstick_defaults_to_dry_run_with_cheap_verification(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _RecordingBeads()
