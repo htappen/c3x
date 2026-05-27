@@ -2331,7 +2331,7 @@ def test_resolve_conflict_starts_resolver_attempt(monkeypatch, tmp_path: Path) -
     beads.items["bd-1"] = BeadSummary(
         id="bd-1",
         title="fix",
-        labels=("flow", "blocked", "land-blocked", "blocker-merge-conflict"),
+        labels=("flow", "land-blocked", "blocker-merge-conflict"),
     )
     run_dir = tmp_path / ".flow" / "runs" / "bd-1"
     RunRecord(
@@ -2372,7 +2372,14 @@ def test_resolve_conflict_starts_resolver_attempt(monkeypatch, tmp_path: Path) -
             branch="c3x/bd-1-fix-conflict-attempt-2",
             worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-conflict-attempt-2"),
             prompt=str(tmp_path / ".flow" / "runs" / "bd-1" / "prompt.md"),
-            result=str(tmp_path / ".flow" / "runs" / "bd-1" / "result.json"),
+            result=str(
+                tmp_path
+                / ".flow"
+                / "worktrees"
+                / "c3x-bd-1-fix-conflict-attempt-2"
+                / ".c3x"
+                / "result.json"
+            ),
             last_message=str(tmp_path / ".flow" / "runs" / "bd-1" / "last-message.md"),
             attempt=attempt or 2,
         )
@@ -2396,5 +2403,8 @@ def test_resolve_conflict_starts_resolver_attempt(monkeypatch, tmp_path: Path) -
     assert "completed" in str(captured["original_result"])
     assert captured["attempt"] == 2
     assert (tmp_path / ".flow" / "runs" / "bd-1-attempt-2" / "run.json").exists()
+    seeded = tmp_path / ".flow" / "runs" / "bd-1" / "result.json"
+    assert seeded.exists()
+    assert WorkerResult.model_validate_json(seeded.read_text(encoding="utf-8")).status == "completed"
     assert ("bd-1", "in_progress") in beads.statuses
     assert any("conflict-resolver" in labels for task_id, labels in beads.added_labels if task_id == "bd-1")

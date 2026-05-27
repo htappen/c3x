@@ -1154,10 +1154,10 @@ def _conflict_task_ids(beads: Beads, *, task_id: str | None, all_tasks: bool) ->
         raise ValueError("pass a task id or --all")
     if task_id:
         task = beads.show(task_id)
-        if not {"flow", "blocked", "land-blocked", "blocker-merge-conflict"}.issubset(set(task.labels)):
+        if not {"flow", "land-blocked", "blocker-merge-conflict"}.issubset(set(task.labels)):
             raise ValueError(f"{task_id} is not blocked on a merge conflict")
         return [task_id]
-    blocked = _with_labels(beads.list_active(), {"flow", "blocked", "land-blocked", "blocker-merge-conflict"})
+    blocked = _with_labels(beads.list_active(), {"flow", "land-blocked", "blocker-merge-conflict"})
     return [item.id for item in blocked]
 
 
@@ -1229,11 +1229,30 @@ def _resolve_conflict_task(root: Path, config: object, beads: Beads, task_id: st
         original_result=original_result,
         attempt=attempt,
     )
+    _seed_conflict_resolver_result(root, task_id, original_result, attempt=record.attempt)
     beads.set_status(task_id, "in_progress")
     beads.add_labels(task_id, ["flow", "running", "conflict-resolver", f"attempt-{record.attempt}"])
     beads.remove_labels(task_id, ["ready", "reviewing", "blocked"])
     beads.add_note(task_id, f"c3x conflict resolver started attempt {record.attempt}")
     return record
+
+
+def _seed_conflict_resolver_result(root: Path, task_id: str, original_result: str, *, attempt: int) -> None:
+    try:
+        WorkerResult.model_validate_json(original_result)
+    except ValueError:
+        original_result = WorkerResult(
+            task_id=task_id,
+            status="blocked",
+            summary="Original worker result was unavailable when conflict resolution started.",
+            task_kind="merge-conflict",
+            attempt=attempt,
+            blockers=["Missing or invalid original result.json before conflict resolver attempt."],
+            blocker_category="result-missing",
+            confidence="low",
+            unfinished=[],
+        ).model_dump_json(indent=2) + "\n"
+    _save_canonical_result(root, task_id, original_result)
 
 
 def _read_original_result(root: Path, task_id: str) -> str:
