@@ -12,6 +12,7 @@ Use `flow-shared` communication policy for summaries and blocker reports.
 ## Rules
 
 - Work only on the assigned task.
+- Use `bd show <task-id>` to retrieve the task Description and acceptance criteria to get the full context of your assigned task.
 - Investigate before editing.
 - Stay inside the owned file scope unless you emit a scope-expansion request.
 - Run the required verification commands when available.

@@ -122,7 +122,8 @@ def test_worker_prompt_forbids_beads_and_git_landing(tmp_path: Path) -> None:
         tmp_path / "result.json",
     )
 
-    assert "Do not run Beads commands" in prompt
+    assert "Do not run other Beads commands" in prompt
+    assert "bd show bd-1" in prompt
     assert "Do not run `git commit`, `git push`, `git pull`, `git merge`" in prompt
     assert "The supervisor will commit and merge" in prompt
 

@@ -9,6 +9,10 @@ Review completed worker output conservatively.
 
 Use `flow-shared` communication policy for review summaries and rejection reasons.
 
+## Rules
+
+- Use `bd show <task-id>` to retrieve the full task Details, Description, and acceptance criteria to verify the worker's changes against the assigned task.
+
 ## Gates
 
 Block landing when:

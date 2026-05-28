@@ -2989,7 +2989,14 @@ def _missing_result_worker_result(root: Path, record: RunRecord) -> WorkerResult
 
 
 def _review_result(result: WorkerResult) -> None:
-    _ = result
+    if result.status != "completed":
+        raise ValueError(f"Worker status is '{result.status}', not 'completed'")
+    for command in result.verification:
+        if command.status == "failed" or (command.exit_code is not None and command.exit_code != 0):
+            raise ValueError(f"Verification failed: {command.command} failed")
+        if command.status == "skipped":
+            raise ValueError(f"Verification failed: {command.command} was skipped")
+
 
 
 def _print_verification(results: list) -> None:

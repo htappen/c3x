@@ -12,6 +12,7 @@ Use `flow-shared` communication policy for summaries and blocker reports.
 ## Rules
 
 - Inspect the conflicted files and both sides of the merge before editing.
+- Use `bd show <task-id>` to retrieve the task Description and acceptance criteria to understand the task intent when resolving conflicts.
 - Preserve the original task intent and the current target branch behavior.
 - Resolve only the merge conflict. Do not make unrelated changes.
 - Do not write directly to Beads.

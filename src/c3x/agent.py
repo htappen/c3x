@@ -342,7 +342,8 @@ Work on exactly this task in the current git worktree.
 
 Supervisor owns task state, commits, merges, cleanup, and all Beads writes.
 
-Do not run Beads commands, including `bd prime`, `bd ready`, `bd update`, `bd close`,
+You may run `bd show {task.id}` to fetch the full task Description and acceptance criteria.
+Do not run other Beads commands, including `bd prime`, `bd ready`, `bd update`, `bd close`,
 `bd create`, `bd dolt pull`, or `bd dolt push`.
 
 Do not run `git commit`, `git push`, `git pull`, `git merge`, or branch cleanup.
@@ -403,7 +404,8 @@ session context is insufficient or clearly stale.
 
 Supervisor owns task state, commits, merges, cleanup, and all Beads writes.
 
-Do not run Beads commands, including `bd prime`, `bd ready`, `bd update`, `bd close`,
+You may run `bd show {task.id}` to fetch the full task Description and acceptance criteria.
+Do not run other Beads commands, including `bd prime`, `bd ready`, `bd update`, `bd close`,
 `bd create`, `bd dolt pull`, or `bd dolt push`.
 
 Do not run `git commit`, `git push`, `git pull`, `git merge`, or branch cleanup.
@@ -465,7 +467,8 @@ they are clearly wrong for this task.
 
 Supervisor owns task state, commits, merges, cleanup, and all Beads writes.
 
-Do not run Beads commands, including `bd prime`, `bd ready`, `bd update`, `bd close`,
+You may run `bd show {task.id}` to fetch the full task Description and acceptance criteria.
+Do not run other Beads commands, including `bd prime`, `bd ready`, `bd update`, `bd close`,
 `bd create`, `bd dolt pull`, or `bd dolt push`.
 
 Do not run `git commit`, `git push`, `git pull`, `git merge`, or branch cleanup.
@@ -534,7 +537,8 @@ Original worker result:
 
 Supervisor owns task state, commits, merges, cleanup, and all Beads writes.
 
-Do not run Beads commands, including `bd prime`, `bd ready`, `bd update`, `bd close`,
+You may run `bd show {task.id}` to fetch the full task Description and acceptance criteria.
+Do not run other Beads commands, including `bd prime`, `bd ready`, `bd update`, `bd close`,
 `bd create`, `bd dolt pull`, or `bd dolt push`.
 
 Do not run `git commit`, `git push`, `git pull`, `git merge`, or branch cleanup.
