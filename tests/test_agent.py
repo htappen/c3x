@@ -127,6 +127,16 @@ def test_worker_prompt_forbids_beads_and_git_landing(tmp_path: Path) -> None:
     assert "The supervisor will commit and merge" in prompt
 
 
+def test_worker_prompt_requires_agents_instructions(tmp_path: Path) -> None:
+    prompt = _worker_prompt(
+        BeadSummary(id="bd-1", title="Fix auth"),
+        tmp_path / "result.json",
+    )
+
+    assert "read and follow the root `AGENTS.md`" in prompt
+    assert "nested\n`AGENTS.md` files" in prompt
+
+
 def test_start_worker_launches_in_new_process_session(monkeypatch, tmp_path: Path) -> None:
     popen_kwargs: dict[str, object] = {}
 

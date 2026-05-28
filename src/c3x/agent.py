@@ -570,4 +570,7 @@ def _worker_prompt_preamble() -> str:
 Before task work, preserve the `/status` output in the worker log/transcript.
 If this Codex mode does not execute slash commands from prompts, continue normally
 after this status probe.
+
+Before editing files, read and follow the root `AGENTS.md` plus any nested
+`AGENTS.md` files that apply to the files you touch.
 """
