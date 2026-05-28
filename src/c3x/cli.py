@@ -546,6 +546,11 @@ def land(
     """Merge a reviewed task branch and close the bead."""
     root = _root()
     _warn_if_risky_flow_branch(root)
+    if worktree_has_changes(root, ignored_prefixes=(".c3x/", ".flow/")):
+        try:
+            commit_worktree_changes(root, f"Save local changes before landing task {task_id}")
+        except GitError as exc:
+            raise typer.Exit(_error(f"root worktree has uncommitted changes that could not be saved: {exc}"))
     try:
         record = _load_repaired_current_run_record(root, task_id)
         if record.status != "reviewed":
@@ -685,6 +690,11 @@ def unstick(
     root = _root()
     if fix:
         dry_run = False
+    if not dry_run and worktree_has_changes(root, ignored_prefixes=(".c3x/", ".flow/")):
+        try:
+            commit_worktree_changes(root, "Save local changes before unsticking task")
+        except GitError as exc:
+            raise typer.Exit(_error(f"root worktree has uncommitted changes that could not be saved: {exc}"))
     if verify_mode not in {"cheap", "none"}:
         raise typer.Exit(_error("--verify must be cheap or none"))
     try:
@@ -2387,6 +2397,12 @@ def _print_unstick_candidates(candidates: list[UnstickCandidate], *, fix: bool) 
 
 def _apply_unstick_candidate(root: Path, beads: Beads, candidate: UnstickCandidate) -> None:
     record = _load_repaired_current_run_record(root, candidate.task_id)
+    worktree = Path(record.worktree)
+    if worktree.exists() and worktree_has_changes(worktree):
+        try:
+            commit_worktree_changes(worktree, f"Save local changes before unsticking task {candidate.task_id}")
+        except GitError as exc:
+            raise ValueError(f"worker worktree has uncommitted changes that could not be saved: {exc}")
     item = beads.show(candidate.task_id)
     if candidate.action == "mark-completed-from-result":
         evidence = _completed_result_evidence(root, candidate.task_id)
@@ -2605,6 +2621,9 @@ def _auto_review(root: Path, beads: Beads) -> None:
 
 
 def _auto_land(root: Path, beads: Beads, *, cleanup_done: bool) -> None:
+    if worktree_has_changes(root, ignored_prefixes=(".c3x/", ".flow/")):
+        _write_activity_event(root, "not landing", "root worktree has uncommitted changes")
+        return
     for item in _with_labels(beads.list_active(), {"flow", "reviewing", "reviewed"}):
         try:
             record = _load_repaired_current_run_record(root, item.id)
@@ -2738,6 +2757,11 @@ def _import_finished_results(root: Path, beads: Beads) -> None:
             record.outcome = "rejected"
         elif result.status == "completed":
             _save_canonical_result(root, record.task_id, result_text)
+            if record.task_type == "conflict_resolver":
+                try:
+                    commit_worktree_changes(Path(record.worktree), f"Resolve merge conflicts for c3x task {record.task_id}")
+                except GitError as exc:
+                    console.print(f"[yellow]Failed to commit conflict resolver changes[/yellow] {record.task_id}: {exc}")
             _try_beads_write(
                 f"record completed result for {record.task_id}",
                 lambda: beads.add_note(record.task_id, _result_note(result)),

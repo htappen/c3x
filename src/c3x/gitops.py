@@ -107,7 +107,12 @@ def is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
 
 
 def worktree_has_changes(worktree: Path, *, ignored_prefixes: tuple[str, ...] = (".c3x/",)) -> bool:
-    result = _git(worktree, ["status", "--porcelain", "--untracked-files=all"], capture=True)
+    if not (worktree / ".git").exists():
+        return False
+    try:
+        result = _git(worktree, ["status", "--porcelain", "--untracked-files=all"], capture=True)
+    except GitError:
+        return False
     for line in result.stdout.splitlines():
         path = line[3:]
         if not path:

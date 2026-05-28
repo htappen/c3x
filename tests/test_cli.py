@@ -2643,3 +2643,96 @@ def test_conflict_task_ids_skip_running_stale_land_blockers() -> None:
     )
 
     assert cli._conflict_task_ids(beads, task_id=None, all_tasks=True) == ["bd-blocked"]
+
+
+def test_land_stops_when_root_is_dirty(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_warn_if_risky_flow_branch", lambda root: None)
+    monkeypatch.setattr(cli, "worktree_has_changes", lambda root, ignored_prefixes=None: True)
+
+    result = runner.invoke(cli.app, ["land", "bd-1"])
+    assert result.exit_code != 0
+    assert "root worktree has uncommitted changes" in result.stdout
+
+
+def test_unstick_stops_when_root_is_dirty(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "worktree_has_changes", lambda root, ignored_prefixes=None: True)
+
+    result = runner.invoke(cli.app, ["unstick", "--fix"])
+    assert result.exit_code != 0
+    assert "root worktree has uncommitted changes" in result.stdout
+
+
+def test_apply_unstick_commits_changes_when_worker_is_dirty(monkeypatch, tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="fix",
+        labels=("flow", "running", "reviewed"),
+    )
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    worktree.mkdir(parents=True)
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="completed",
+    ).save(run_dir / "run.json")
+
+    committed_worktrees = []
+    monkeypatch.setattr(cli, "worktree_has_changes", lambda path, ignored_prefixes=None: True)
+    monkeypatch.setattr(cli, "commit_worktree_changes", lambda path, message: committed_worktrees.append(path))
+
+    candidate = cli.UnstickCandidate(
+        task_id="bd-1",
+        action="mark-reviewed",
+        reason="test",
+        record_status="completed",
+        bead_status="in_progress",
+    )
+
+    cli._apply_unstick_candidate(tmp_path, beads, candidate)
+    assert committed_worktrees == [worktree]
+
+
+def test_import_finished_results_commits_conflict_resolver_changes(monkeypatch, tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="fix",
+        status="in_progress",
+        labels=("flow", "running"),
+    )
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-conflict"
+    result_path = worktree / ".c3x" / "result.json"
+    result_path.parent.mkdir(parents=True)
+    result_path.write_text(
+        WorkerResult(task_id="bd-1", status="completed", summary="done").model_dump_json(),
+        encoding="utf-8",
+    )
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix-conflict",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(result_path),
+        last_message=str(run_dir / "last-message.md"),
+        status="running",
+        task_type="conflict_resolver",
+    ).save(run_dir / "run.json")
+
+    committed_worktrees = []
+    monkeypatch.setattr(cli, "commit_worktree_changes", lambda path, message: committed_worktrees.append(path))
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+
+    cli._import_finished_results(tmp_path, beads)
+    assert committed_worktrees == [worktree]
