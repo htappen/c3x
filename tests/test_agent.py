@@ -161,7 +161,41 @@ def test_start_worker_launches_in_new_process_session(monkeypatch, tmp_path: Pat
     record = start_worker(tmp_path, config, BeadSummary(id="bd-1", title="Fix auth"))
 
     assert record.pid == 12345
+    assert record.provider == "codex"
+    assert record.task_type == "worker"
     assert popen_kwargs["start_new_session"] is True
+
+
+def test_start_worker_uses_worker_provider_override(monkeypatch, tmp_path: Path) -> None:
+    launched: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 12345
+
+    def fake_popen(command: list[str], **kwargs: object) -> FakeProcess:
+        launched["command"] = command
+        return FakeProcess()
+
+    monkeypatch.setattr(agent, "create_worktree", lambda root, branch, worktree: worktree.mkdir(parents=True))
+    monkeypatch.setattr(agent.subprocess, "Popen", fake_popen)
+    config = C3xConfig.model_validate(
+        {
+            "agents": {
+                "provider": "codex",
+                "provider_overrides": {"worker": "antigravity"},
+                "codex_command": "fake-codex",
+                "codex_args": ["{prompt}"],
+                "antigravity_command": "fake-agy",
+                "antigravity_args": ["--print", "{prompt_content}"],
+            }
+        }
+    )
+
+    record = start_worker(tmp_path, config, BeadSummary(id="bd-1", title="Fix auth"))
+
+    assert launched["command"][0] == "fake-agy"
+    assert record.provider == "antigravity"
+    assert record.task_type == "worker"
 
 
 def test_next_attempt_uses_record_and_worktree_suffixes(tmp_path: Path) -> None:
@@ -225,6 +259,44 @@ def test_agent_command_substitutes_runtime_paths_antigravity(tmp_path: Path) -> 
         "--print",
         "Task: bd-1\nHello prompt content",
     ]
+
+
+def test_agent_command_uses_task_type_provider_override(tmp_path: Path) -> None:
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("Task: bd-1\nHello prompt content", encoding="utf-8")
+
+    config = C3xConfig.model_validate(
+        {
+            "agents": {
+                "provider": "codex",
+                "provider_overrides": {"worker": "antigravity"},
+                "codex_command": "fake-codex",
+                "codex_args": ["{prompt}"],
+                "antigravity_command": "fake-agy",
+                "antigravity_args": ["--print", "{prompt_content}"],
+            }
+        }
+    )
+
+    worker_command = _agent_command(
+        config,
+        tmp_path / "wt",
+        prompt_file,
+        tmp_path / "result.json",
+        tmp_path / "last.md",
+        task_type="worker",
+    )
+    resolver_command = _agent_command(
+        config,
+        tmp_path / "wt",
+        prompt_file,
+        tmp_path / "result.json",
+        tmp_path / "last.md",
+        task_type="conflict_resolver",
+    )
+
+    assert worker_command[0] == "fake-agy"
+    assert resolver_command[0] == "fake-codex"
 
 
 def test_agent_command_can_resume_session_antigravity(tmp_path: Path) -> None:

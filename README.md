@@ -391,6 +391,26 @@ agents:
 `~/.local/bin/agy.va39`, so only `provider: antigravity` is required when that
 path is correct. Use `antigravity_command` if your binary lives elsewhere.
 
+Use `provider_overrides` when you want the global provider to stay on Codex, but
+specific worker task types to use another provider. For example, this keeps
+Codex as the fallback for supervisor/review/merge-related behavior and uses
+Antigravity only for normal coding workers:
+
+```yaml
+agents:
+  provider: codex
+  provider_overrides:
+    worker: antigravity
+  antigravity_command: ~/.local/bin/agy.va39
+```
+
+Provider override keys currently used by worker launch are:
+
+- `worker`: normal coding workers, including retries and continued worktree/session attempts.
+- `conflict_resolver`: merge-conflict resolver workers started by `c3x resolve-conflict` or `c3x watch`.
+
+Task types without an override use `agents.provider`.
+
 Worker argument templates support these placeholders:
 
 - `{model}`: configured worker model.

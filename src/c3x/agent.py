@@ -31,7 +31,9 @@ def start_worker(root: Path, config: C3xConfig, task: BeadSummary, *, attempt: i
     result.parent.mkdir(parents=True, exist_ok=True)
     prompt.write_text(_worker_prompt(task, result), encoding="utf-8")
 
-    command = _agent_command(config, worktree, prompt, result, last_message)
+    task_type = "worker"
+    provider = _provider_for_task(config, task_type)
+    command = _agent_command(config, worktree, prompt, result, last_message, task_type=task_type)
     process = subprocess.Popen(
         command,
         cwd=worktree,
@@ -47,6 +49,8 @@ def start_worker(root: Path, config: C3xConfig, task: BeadSummary, *, attempt: i
         prompt=str(prompt),
         result=str(result),
         last_message=str(last_message),
+        provider=provider,
+        task_type=task_type,
         pid=process.pid,
         attempt=attempt,
     )
@@ -80,12 +84,15 @@ def resume_session_worker(
         encoding="utf-8",
     )
 
+    task_type = "worker"
+    provider = _provider_for_task(config, task_type)
     command = _agent_command(
         config,
         worktree,
         prompt,
         result,
         last_message,
+        task_type=task_type,
         resume_session_id=session_id,
     )
     process = subprocess.Popen(
@@ -103,6 +110,8 @@ def resume_session_worker(
         prompt=str(prompt),
         result=str(result),
         last_message=str(last_message),
+        provider=provider,
+        task_type=task_type,
         pid=process.pid,
         attempt=attempt,
     )
@@ -135,7 +144,9 @@ def continue_worktree_worker(
         encoding="utf-8",
     )
 
-    command = _agent_command(config, worktree, prompt, result, last_message)
+    task_type = "worker"
+    provider = _provider_for_task(config, task_type)
+    command = _agent_command(config, worktree, prompt, result, last_message, task_type=task_type)
     process = subprocess.Popen(
         command,
         cwd=worktree,
@@ -151,6 +162,8 @@ def continue_worktree_worker(
         prompt=str(prompt),
         result=str(result),
         last_message=str(last_message),
+        provider=provider,
+        task_type=task_type,
         pid=process.pid,
         attempt=attempt,
     )
@@ -198,7 +211,9 @@ def start_conflict_resolver(
         encoding="utf-8",
     )
 
-    command = _agent_command(config, worktree, prompt, result, last_message)
+    task_type = "conflict_resolver"
+    provider = _provider_for_task(config, task_type)
+    command = _agent_command(config, worktree, prompt, result, last_message, task_type=task_type)
     process = subprocess.Popen(
         command,
         cwd=worktree,
@@ -214,6 +229,8 @@ def start_conflict_resolver(
         prompt=str(prompt),
         result=str(result),
         last_message=str(last_message),
+        provider=provider,
+        task_type=task_type,
         pid=process.pid,
         attempt=attempt,
     )
@@ -228,55 +245,47 @@ def _agent_command(
     result: Path,
     last_message: Path,
     *,
+    task_type: str = "worker",
     resume_session_id: str | None = None,
 ) -> list[str]:
-    provider = getattr(config.agents, "provider", "codex")
+    provider = _provider_for_task(config, task_type)
+    prompt_content = ""
+    if prompt.exists():
+        prompt_content = prompt.read_text(encoding="utf-8")
+
+    mapping = {
+        "model": config.models.worker,
+        "worktree": str(worktree),
+        "prompt": str(prompt),
+        "prompt_content": prompt_content,
+        "result": str(result),
+        "last_message": str(last_message),
+        "session_id": resume_session_id or "",
+    }
+
     if provider == "antigravity":
         command_str = config.agents.antigravity_command
         executable = shlex.split(command_str)
         if not executable:
             raise AgentError("agents.antigravity_command cannot be empty")
         executable[0] = str(Path(executable[0]).expanduser())
-        
-        prompt_content = ""
-        if prompt.exists():
-            prompt_content = prompt.read_text(encoding="utf-8")
-
-        mapping = {
-            "model": config.models.worker,
-            "worktree": str(worktree),
-            "prompt": str(prompt),
-            "prompt_content": prompt_content,
-            "result": str(result),
-            "last_message": str(last_message),
-            "session_id": resume_session_id or "",
-        }
         template = config.agents.antigravity_resume_args if resume_session_id else config.agents.antigravity_args
         args = [arg.format(**mapping) for arg in template]
         return [*executable, *args]
-    else:
-        command_str = config.agents.codex_command
-        executable = shlex.split(command_str)
-        if not executable:
-            raise AgentError("agents.codex_command cannot be empty")
-        executable[0] = str(Path(executable[0]).expanduser())
-        
-        prompt_content = ""
-        if prompt.exists():
-            prompt_content = prompt.read_text(encoding="utf-8")
 
-        mapping = {
-            "model": config.models.worker,
-            "worktree": str(worktree),
-            "prompt": str(prompt),
-            "prompt_content": prompt_content,
-            "result": str(result),
-            "last_message": str(last_message),
-            "session_id": resume_session_id or "",
-        }
-        template = config.agents.codex_resume_args if resume_session_id else config.agents.codex_args
-        args = [arg.format(**mapping) for arg in template]
-        return [*executable, *args]
+    command_str = config.agents.codex_command
+    executable = shlex.split(command_str)
+    if not executable:
+        raise AgentError("agents.codex_command cannot be empty")
+    executable[0] = str(Path(executable[0]).expanduser())
+    template = config.agents.codex_resume_args if resume_session_id else config.agents.codex_args
+    args = [arg.format(**mapping) for arg in template]
+    return [*executable, *args]
+
+
+def _provider_for_task(config: C3xConfig, task_type: str) -> str:
+    overrides = getattr(config.agents, "provider_overrides", {})
+    return overrides.get(task_type, getattr(config.agents, "provider", "codex"))
 
 
 def _next_attempt(root: Path, task_id: str) -> int:

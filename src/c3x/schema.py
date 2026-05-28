@@ -53,6 +53,8 @@ class RunRecord(BaseModel):
     prompt: str
     result: str
     last_message: str
+    provider: str = "codex"
+    task_type: str = "worker"
     status: RunStatus = "running"
     pid: int | None = None
     attempt: int = 1

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 FLOW_DIR = ".flow"
@@ -12,6 +12,7 @@ CONFIG_PATH = Path(FLOW_DIR) / "config.yml"
 
 class AgentConfig(BaseModel):
     provider: str = "codex"
+    provider_overrides: dict[str, str] = Field(default_factory=dict)
     codex_command: str = "codex"
     codex_args: list[str] = Field(
         default_factory=lambda: [
@@ -61,6 +62,21 @@ class AgentConfig(BaseModel):
             "{prompt_content}",
         ]
     )
+
+    @field_validator("provider", mode="after")
+    @classmethod
+    def _validate_provider(cls, value: str) -> str:
+        if value not in {"codex", "antigravity"}:
+            raise ValueError("agents.provider must be 'codex' or 'antigravity'")
+        return value
+
+    @field_validator("provider_overrides", mode="after")
+    @classmethod
+    def _validate_provider_overrides(cls, value: dict[str, str]) -> dict[str, str]:
+        invalid = sorted({provider for provider in value.values() if provider not in {"codex", "antigravity"}})
+        if invalid:
+            raise ValueError("agents.provider_overrides values must be 'codex' or 'antigravity'")
+        return value
 
 
 class ModelConfig(BaseModel):
