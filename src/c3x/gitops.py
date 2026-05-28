@@ -106,6 +106,18 @@ def is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
     return result.returncode == 0
 
 
+def worktree_has_changes(worktree: Path, *, ignored_prefixes: tuple[str, ...] = (".c3x/",)) -> bool:
+    result = _git(worktree, ["status", "--porcelain", "--untracked-files=all"], capture=True)
+    for line in result.stdout.splitlines():
+        path = line[3:]
+        if not path:
+            continue
+        if any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in ignored_prefixes):
+            continue
+        return True
+    return False
+
+
 def branch_diff_summary(root: Path, branch: str) -> str:
     commits = _git(root, ["log", "--oneline", f"HEAD..{branch}"], capture=True)
     stat = _git(root, ["diff", "--stat", f"HEAD..{branch}"], capture=True)

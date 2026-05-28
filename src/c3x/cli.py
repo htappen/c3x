@@ -43,6 +43,7 @@ from c3x.gitops import (
     remove_worktree,
     rev_parse,
     squash_head_to,
+    worktree_has_changes,
 )
 from c3x.metrics import collect_metrics
 from c3x.paths import activity_path, pause_path, result_path, run_record_path, stuck_notice_path
@@ -2145,7 +2146,7 @@ def _unstick_candidates(root: Path, beads: Beads, *, task_id: str | None, verify
             )
             continue
 
-        if record.status in {"completed", "reviewed"} and _branch_is_contained(root, record.branch):
+        if record.status in {"completed", "reviewed"} and _branch_is_safely_contained(root, record):
             candidates.append(
                 UnstickCandidate(
                     task_id=item.id,
@@ -2350,9 +2351,12 @@ def _run_command_check(root: Path, command: str) -> bool:
     return result.returncode == 0
 
 
-def _branch_is_contained(root: Path, branch: str) -> bool:
+def _branch_is_safely_contained(root: Path, record: RunRecord) -> bool:
     try:
-        return is_ancestor(root, branch, "HEAD")
+        if not is_ancestor(root, record.branch, "HEAD"):
+            return False
+        worktree = Path(record.worktree)
+        return not worktree.exists() or not worktree_has_changes(worktree)
     except GitError:
         return False
 

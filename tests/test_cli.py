@@ -2171,6 +2171,35 @@ def test_unstick_defaults_to_dry_run_with_cheap_verification(monkeypatch, tmp_pa
     assert "bd-1" in beads.items
 
 
+def test_unstick_does_not_close_contained_dirty_worktree(monkeypatch, tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="fix",
+        status="in_progress",
+        labels=("flow", "running"),
+    )
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    worktree.mkdir(parents=True)
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="completed",
+        finished_at="2026-05-25T00:00:00+00:00",
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "is_ancestor", lambda root, branch, descendant: True)
+    monkeypatch.setattr(cli, "worktree_has_changes", lambda path: True)
+
+    candidates = cli._unstick_candidates(tmp_path, beads, task_id="bd-1", verify_mode="none")
+
+    assert candidates == []
+
+
 def test_unstick_detects_completed_result_for_blocked_task(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _RecordingBeads()
