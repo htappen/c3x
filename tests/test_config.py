@@ -64,8 +64,9 @@ def test_default_config_has_per_provider_models(tmp_path: Path) -> None:
     config = load_config(tmp_path)
 
     assert "codex" in config.models.root
-    assert "agy" in config.models.root
+    assert "antigravity" in config.models.root
     assert isinstance(config.models["codex"], ProviderModelConfig)
+    assert config.models_for_provider("antigravity").worker == "Gemini 3.5 Flash (Medium)"
 
 
 def test_models_for_provider_returns_correct_block(tmp_path: Path) -> None:
@@ -80,7 +81,7 @@ models:
     reviewer: o4
     critic: o4
     verify: o4
-  agy:
+  antigravity:
     worker: claude-sonnet
     architect: claude-opus
     reviewer: claude-sonnet
@@ -93,7 +94,7 @@ models:
     config = load_config(tmp_path)
 
     assert config.models_for_provider("codex").worker == "o4-mini"
-    assert config.models_for_provider("agy").worker == "claude-sonnet"
+    assert config.models_for_provider("antigravity").worker == "claude-sonnet"
 
 
 def test_models_for_provider_falls_back_to_codex_defaults(tmp_path: Path) -> None:
@@ -110,7 +111,7 @@ def test_models_for_provider_falls_back_to_defaults_when_no_codex_block(tmp_path
     path.write_text(
         """
 models:
-  agy:
+  antigravity:
     worker: claude-sonnet
     architect: claude-opus
     reviewer: claude-sonnet
@@ -144,9 +145,9 @@ def test_migrate_flat_models_produces_per_provider_dict() -> None:
     result = migrate_flat_models(flat)
 
     assert "codex" in result
-    assert "agy" in result
+    assert "antigravity" in result
     assert result["codex"]["worker"] == "gpt-5.4-mini"
-    assert result["agy"]["worker"] == "gpt-5.4-mini"
+    assert result["antigravity"]["worker"] == "gpt-5.4-mini"
 
 
 def test_migrate_config_data_migrates_flat_models_section() -> None:
@@ -170,7 +171,7 @@ def test_migrate_config_data_does_not_alter_new_format() -> None:
     data = {
         "models": {
             "codex": {"worker": "o4-mini", "architect": "o4", "reviewer": "o4", "critic": "o4", "verify": "o4"},
-            "agy": {
+            "antigravity": {
                 "worker": "claude-sonnet",
                 "architect": "claude-opus",
                 "reviewer": "claude-sonnet",
@@ -221,4 +222,25 @@ models:
     config = load_config(tmp_path)
 
     assert config.models_for_provider("codex").worker == "gpt-5.4-mini"
-    assert config.models_for_provider("agy").worker == "gpt-5.4-mini"
+    assert config.models_for_provider("antigravity").worker == "gpt-5.4-mini"
+
+
+def test_load_config_migrates_legacy_agy_provider_on_read(tmp_path: Path) -> None:
+    path = tmp_path / CONFIG_PATH
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        """
+models:
+  codex:
+    worker: gpt-5.4-mini
+  agy:
+    worker: custom-agy-worker
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path)
+
+    assert "antigravity" in config.models.root
+    assert "agy" not in config.models.root
+    assert config.models_for_provider("antigravity").worker == "custom-agy-worker"

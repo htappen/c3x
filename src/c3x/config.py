@@ -95,20 +95,26 @@ class ProviderModelConfig(BaseModel):
 
 _DEFAULT_PROVIDER_MODELS: dict[str, ProviderModelConfig] = {
     "codex": ProviderModelConfig(),
-    "agy": ProviderModelConfig(),
+    "antigravity": ProviderModelConfig(
+        architect="Gemini 3.5 Flash (Medium)",
+        worker="Gemini 3.5 Flash (Medium)",
+        reviewer="Gemini 3.5 Flash (Medium)",
+        critic="Gemini 3.5 Flash (Medium)",
+        verify="Gemini 3.5 Flash (Medium)",
+    ),
 }
 
 
 class ModelConfig(BaseModel):
     """Per-provider model configuration.
 
-    Keyed by provider name (e.g. ``"codex"``, ``"agy"``).  Access a provider's
+    Keyed by provider name (e.g. ``"codex"``, ``"antigravity"``).  Access a provider's
     models with ``config.models["codex"]`` or the helper
     ``C3xConfig.models_for_provider(provider)``.
     """
 
     root: dict[str, ProviderModelConfig] = Field(
-        default_factory=lambda: {k: ProviderModelConfig() for k in _DEFAULT_PROVIDER_MODELS}
+        default_factory=lambda: {k: v.model_copy() for k, v in _DEFAULT_PROVIDER_MODELS.items()}
     )
 
     @model_validator(mode="before")
@@ -117,7 +123,7 @@ class ModelConfig(BaseModel):
         """Accept a raw dict and normalise it into ``{"root": {...}}``.
 
         Handles two raw shapes:
-        * New format: ``{"codex": {...}, "agy": {...}}``
+        * New format: ``{"codex": {...}, "antigravity": {...}}``
         * Legacy flat format: ``{"architect": "...", "worker": "...", ...}``
 
         Empty dicts and non-dict values are passed through unchanged so that
@@ -131,6 +137,10 @@ class ModelConfig(BaseModel):
         # Detect legacy flat format where keys are role names.
         if all(k in _ROLE_FIELDS for k in value):
             value = migrate_flat_models(value)
+        # Migrate legacy "agy" key to "antigravity"
+        if "agy" in value:
+            value = dict(value)
+            value["antigravity"] = value.pop("agy")
         return {"root": value}
 
     def __getitem__(self, provider: str) -> ProviderModelConfig:
@@ -188,7 +198,7 @@ def migrate_flat_models(flat: dict[str, Any]) -> dict[str, dict[str, Any]]:
           codex:
             architect: gpt-5.4
             worker: gpt-5.4-mini
-          agy:
+          antigravity:
             architect: gpt-5.4
             worker: gpt-5.4-mini
     """
@@ -199,14 +209,20 @@ def migrate_flat_models(flat: dict[str, Any]) -> dict[str, dict[str, Any]]:
 def migrate_config_data(data: dict[str, Any]) -> dict[str, Any]:
     """Return *data* with any legacy sections migrated to current format.
 
-    Currently handles the flat ``models`` block.  The original dict is not
-    mutated; a shallow copy is returned when a migration is applied.
+    Currently handles the flat ``models`` block and the legacy ``agy`` key.
+    The original dict is not mutated; a shallow copy is returned when a migration
+    is applied.
     """
     if "models" in data and isinstance(data["models"], dict):
         models = data["models"]
         if models and all(k in _ROLE_FIELDS for k in models):
             data = dict(data)
             data["models"] = migrate_flat_models(models)
+        elif "agy" in models:
+            data = dict(data)
+            models_copy = dict(models)
+            models_copy["antigravity"] = models_copy.pop("agy")
+            data["models"] = models_copy
     return data
 
 
