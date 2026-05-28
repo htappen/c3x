@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 FLOW_DIR = ".flow"
 CONFIG_PATH = Path(FLOW_DIR) / "config.yml"
+
+# Role names that appear inside a per-provider model block.
+_ROLE_FIELDS = {"architect", "worker", "reviewer", "critic", "verify"}
 
 
 class AgentConfig(BaseModel):
@@ -79,12 +83,64 @@ class AgentConfig(BaseModel):
         return value
 
 
-class ModelConfig(BaseModel):
+class ProviderModelConfig(BaseModel):
+    """Model names for each agent role, scoped to one provider."""
+
     architect: str = "gpt-5.4"
     worker: str = "gpt-5.4-mini"
     reviewer: str = "gpt-5.4"
     critic: str = "gpt-5.4"
     verify: str = "gpt-5.4"
+
+
+_DEFAULT_PROVIDER_MODELS: dict[str, ProviderModelConfig] = {
+    "codex": ProviderModelConfig(),
+    "agy": ProviderModelConfig(),
+}
+
+
+class ModelConfig(BaseModel):
+    """Per-provider model configuration.
+
+    Keyed by provider name (e.g. ``"codex"``, ``"agy"``).  Access a provider's
+    models with ``config.models["codex"]`` or the helper
+    ``C3xConfig.models_for_provider(provider)``.
+    """
+
+    root: dict[str, ProviderModelConfig] = Field(
+        default_factory=lambda: {k: ProviderModelConfig() for k in _DEFAULT_PROVIDER_MODELS}
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_from_dict(cls, value: Any) -> Any:
+        """Accept a raw dict and normalise it into ``{"root": {...}}``.
+
+        Handles two raw shapes:
+        * New format: ``{"codex": {...}, "agy": {...}}``
+        * Legacy flat format: ``{"architect": "...", "worker": "...", ...}``
+
+        Empty dicts and non-dict values are passed through unchanged so that
+        Pydantic's ``default_factory`` for ``root`` still applies.
+        """
+        if not isinstance(value, dict) or not value:
+            return value
+        # Already wrapped (e.g. constructed internally as ModelConfig(root=...)).
+        if "root" in value and len(value) == 1:
+            return value
+        # Detect legacy flat format where keys are role names.
+        if all(k in _ROLE_FIELDS for k in value):
+            value = migrate_flat_models(value)
+        return {"root": value}
+
+    def __getitem__(self, provider: str) -> ProviderModelConfig:
+        return self.root[provider]
+
+    def get(self, provider: str, default: ProviderModelConfig | None = None) -> ProviderModelConfig | None:
+        return self.root.get(provider, default)
+
+    def model_dump(self, **kwargs: Any) -> dict[str, Any]:  # type: ignore[override]
+        return {k: v.model_dump(**kwargs) for k, v in self.root.items()}
 
 
 class LimitConfig(BaseModel):
@@ -108,6 +164,51 @@ class C3xConfig(BaseModel):
     permissions: PermissionConfig = Field(default_factory=PermissionConfig)
     verify: list[str] = Field(default_factory=list)
 
+    def models_for_provider(self, provider: str) -> ProviderModelConfig:
+        """Return the :class:`ProviderModelConfig` for *provider*.
+
+        Falls back to the ``"codex"`` defaults when the provider is not
+        explicitly configured.
+        """
+        return self.models.get(provider) or self.models.get("codex") or ProviderModelConfig()
+
+
+def migrate_flat_models(flat: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Convert a legacy flat ``models`` block to the new per-provider format.
+
+    Old format::
+
+        models:
+          architect: gpt-5.4
+          worker: gpt-5.4-mini
+
+    New format::
+
+        models:
+          codex:
+            architect: gpt-5.4
+            worker: gpt-5.4-mini
+          agy:
+            architect: gpt-5.4
+            worker: gpt-5.4-mini
+    """
+    provider_block = {k: flat[k] for k in _ROLE_FIELDS if k in flat}
+    return {provider: dict(provider_block) for provider in _DEFAULT_PROVIDER_MODELS}
+
+
+def migrate_config_data(data: dict[str, Any]) -> dict[str, Any]:
+    """Return *data* with any legacy sections migrated to current format.
+
+    Currently handles the flat ``models`` block.  The original dict is not
+    mutated; a shallow copy is returned when a migration is applied.
+    """
+    if "models" in data and isinstance(data["models"], dict):
+        models = data["models"]
+        if models and all(k in _ROLE_FIELDS for k in models):
+            data = dict(data)
+            data["models"] = migrate_flat_models(models)
+    return data
+
 
 def default_config() -> C3xConfig:
     return C3xConfig()
@@ -118,6 +219,7 @@ def load_config(root: Path) -> C3xConfig:
     if not path.exists():
         return default_config()
     data = yaml.safe_load(path.read_text()) or {}
+    data = migrate_config_data(data)
     return C3xConfig.model_validate(data)
 
 

@@ -254,7 +254,7 @@ def _agent_command(
         prompt_content = prompt.read_text(encoding="utf-8")
 
     mapping = {
-        "model": config.models.worker,
+        "model": config.models_for_provider(provider).worker,
         "worktree": str(worktree),
         "prompt": str(prompt),
         "prompt_content": prompt_content,
