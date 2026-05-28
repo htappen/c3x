@@ -348,6 +348,7 @@ Worker launch is configurable in `.flow/config.yml`:
 
 ```yaml
 agents:
+  provider: codex
   codex_command: codex
   codex_args:
     - exec
@@ -360,6 +361,45 @@ agents:
     - "{last_message}"
     - "{prompt}"
 ```
+
+To use Antigravity instead of Codex, set `agents.provider` to `antigravity` and make sure
+`agents.antigravity_command` points at your local Antigravity CLI:
+
+```yaml
+agents:
+  provider: antigravity
+  antigravity_command: ~/.local/bin/agy.va39
+  antigravity_args:
+    - --dangerously-skip-permissions
+    - --sandbox
+    - --add-dir
+    - "{worktree}"
+    - --print
+    - "{prompt_content}"
+  antigravity_resume_args:
+    - --dangerously-skip-permissions
+    - --sandbox
+    - --add-dir
+    - "{worktree}"
+    - --conversation
+    - "{session_id}"
+    - --print
+    - "{prompt_content}"
+```
+
+`provider` defaults to `codex`. The default Antigravity command is
+`~/.local/bin/agy.va39`, so only `provider: antigravity` is required when that
+path is correct. Use `antigravity_command` if your binary lives elsewhere.
+
+Worker argument templates support these placeholders:
+
+- `{model}`: configured worker model.
+- `{worktree}`: isolated git worktree path for the task.
+- `{prompt}`: path to the generated worker prompt file.
+- `{prompt_content}`: generated worker prompt content passed inline.
+- `{result}`: expected worker result path.
+- `{last_message}`: captured last-message path.
+- `{session_id}`: previous provider session ID for retries/resumes.
 
 Tests and smoke validation use `tests/fixtures/fake-codex` so CLI behavior can be verified without contacting a real model-backed agent.
 
