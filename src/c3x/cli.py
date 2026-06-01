@@ -22,6 +22,7 @@ from c3x.agent import (
     _next_attempt,
     continue_worktree_worker,
     resume_session_worker,
+    run_reviewer,
     start_conflict_resolver,
     start_worker,
 )
@@ -47,7 +48,7 @@ from c3x.gitops import (
 )
 from c3x.metrics import collect_metrics
 from c3x.paths import activity_path, pause_path, result_path, run_record_path, stuck_notice_path
-from c3x.schema import RunRecord, WorkerResult
+from c3x.schema import ReviewIssue, ReviewResult, RunRecord, WorkerResult
 from c3x.verify import run_verification
 
 
@@ -520,17 +521,21 @@ def review(
     """Review a completed worker result and mark it ready to land."""
     root = _root()
     try:
+        beads = _beads(root)
         result = _load_worker_result(root, task_id)
         _review_result(result)
-        beads = _beads(root)
-        beads.add_note(task_id, f"c3x review passed: {result.summary}")
-        beads.add_labels(task_id, ["reviewed", "reviewing"])
-        beads.remove_labels(task_id, ["running", "blocked"])
         record = _load_repaired_current_run_record(root, task_id)
-        record.status = "reviewed"
-        record.outcome = "reviewed"
-        record.save(run_record_path(root, task_id))
-    except (BeadsError, ValueError) as exc:
+        item = beads.show(task_id)
+        review_result = run_reviewer(
+            root,
+            load_config(root),
+            item,
+            result,
+            record=record,
+            diff_summary=branch_diff_summary(root, record.branch),
+        )
+        _apply_review_result(root, beads, item, result, review_result, record=record)
+    except (AgentError, BeadsError, ValueError) as exc:
         raise typer.Exit(_error(str(exc))) from exc
     console.print(f"[green]Reviewed[/green] {task_id}")
 
@@ -1428,6 +1433,7 @@ def _retry_task(
 ) -> tuple[RunRecord, RetryMode]:
     task = beads.show(task_id)
     _ensure_retryable(root, task_id)
+    _clear_review_cleanup_blockers(beads, task)
     previous = _current_run_record(root, task_id)
     session_id = _session_id_for_run(previous) if previous is not None else None
     attempt = _next_attempt(root, task_id)
@@ -1462,6 +1468,58 @@ def _retry_task(
     beads.remove_labels(task_id, ["ready", "reviewing", "blocked"])
     beads.add_note(task_id, note)
     return record, mode_used
+
+
+def _clear_review_cleanup_blockers(beads: Beads, task: BeadSummary) -> None:
+    cleanup_tasks = _review_cleanup_tasks(beads, task.id)
+    if not cleanup_tasks:
+        return
+    for cleanup in cleanup_tasks:
+        try:
+            beads.remove_blocker(cleanup.id, task.id)
+        except BeadsError:
+            raise
+        if cleanup.status != "closed":
+            beads.close(cleanup.id, f"Superseded by retry of {task.id}")
+    beads.add_note(task.id, f"c3x retry cleared {len(cleanup_tasks)} superseded review cleanup task(s)")
+
+
+def _review_cleanup_tasks(beads: Beads, task_id: str) -> list[BeadSummary]:
+    cleanup_by_id: dict[str, BeadSummary] = {}
+    for item in beads.list_active():
+        if "review-fix" in item.labels and _blocked_item_id(item) == task_id:
+            cleanup_by_id[item.id] = item
+    for dependency in beads.dependencies(task_id, direction="down", dep_type="blocks"):
+        blocker_id = _dependency_blocker_id(dependency, task_id)
+        if not blocker_id:
+            continue
+        try:
+            blocker = beads.show(blocker_id)
+        except BeadsError:
+            continue
+        if "review-fix" in blocker.labels or _blocked_item_id(blocker) == task_id:
+            cleanup_by_id[blocker.id] = blocker
+    return list(cleanup_by_id.values())
+
+
+def _dependency_blocker_id(dependency: dict[str, object], blocked_id: str) -> str | None:
+    for key in ("depends_on_id", "dependency_id", "blocked_by", "blocker_id", "to_id", "target_id"):
+        value = dependency.get(key)
+        if isinstance(value, str) and value and value != blocked_id:
+            return value
+    for key in ("id", "issue_id", "from_id", "source_id"):
+        value = dependency.get(key)
+        if isinstance(value, str) and value and value != blocked_id:
+            return value
+    return None
+
+
+def _review_cleanup_verification_issues(beads: Beads, task_id: str) -> tuple[str, ...]:
+    cleanup_tasks = _review_cleanup_tasks(beads, task_id)
+    if not cleanup_tasks:
+        return ()
+    task_list = ", ".join(task.id for task in cleanup_tasks)
+    return (f"open review cleanup blockers must be fixed first: {task_list}",)
 
 
 def _resolve_conflict_task(root: Path, config: object, beads: Beads, task_id: str) -> RunRecord:
@@ -2099,6 +2157,7 @@ def _unstick_candidates(root: Path, beads: Beads, *, task_id: str | None, verify
     items = [beads.show(task_id)] if task_id else _with_labels(beads.list_active(), {"flow"})
     candidates: list[UnstickCandidate] = []
     for item in items:
+        review_cleanup_issues = _review_cleanup_verification_issues(beads, item.id)
         completed_evidence = _completed_result_evidence(root, item.id)
         if completed_evidence is not None and _needs_completed_result_state_repair(item, completed_evidence[0]):
             record, result = completed_evidence
@@ -2109,7 +2168,7 @@ def _unstick_candidates(root: Path, beads: Beads, *, task_id: str | None, verify
                     reason=f"completed result.json exists at {record.result} but Beads/run state is stale",
                     record_status=record.status,
                     bead_status=item.status,
-                    verification_issues=(),
+                    verification_issues=review_cleanup_issues,
                     cheap_commands=tuple(command.command for command in result.verification),
                 )
             )
@@ -2141,6 +2200,7 @@ def _unstick_candidates(root: Path, beads: Beads, *, task_id: str | None, verify
         cheap_commands: tuple[str, ...] = ()
         if verify_mode == "cheap" and record.status in {"completed", "reviewed", "landed"}:
             verification_issues, cheap_commands = _cheap_unstick_verification(root, record)
+        verification_issues = (*verification_issues, *review_cleanup_issues)
 
         if record.status == "landed":
             candidates.append(
@@ -2396,6 +2456,18 @@ def _print_unstick_candidates(candidates: list[UnstickCandidate], *, fix: bool) 
 
 
 def _apply_unstick_candidate(root: Path, beads: Beads, candidate: UnstickCandidate) -> None:
+    if candidate.action == "mark-blocked-missing-run-record":
+        beads.add_note(candidate.task_id, "c3x unstick found stale running state with no canonical run.json")
+        beads.add_labels(candidate.task_id, ["flow", "blocked", "blocker-run-record-missing"])
+        beads.remove_labels(candidate.task_id, ["running", "reviewing"])
+        return
+
+    if candidate.action in {"mark-completed-from-result", "mark-reviewed", "close-contained"}:
+        cleanup_tasks = _review_cleanup_tasks(beads, candidate.task_id)
+        if cleanup_tasks:
+            task_list = ", ".join(task.id for task in cleanup_tasks)
+            raise ValueError(f"{candidate.task_id} still has review cleanup blockers: {task_list}")
+
     record = _load_repaired_current_run_record(root, candidate.task_id)
     worktree = Path(record.worktree)
     if worktree.exists() and worktree_has_changes(worktree):
@@ -2442,11 +2514,6 @@ def _apply_unstick_candidate(root: Path, beads: Beads, candidate: UnstickCandida
         if record.finished_at is None:
             record.finished_at = _now()
         record.save(run_record_path(root, candidate.task_id))
-        return
-    if candidate.action == "mark-blocked-missing-run-record":
-        beads.add_note(candidate.task_id, "c3x unstick found stale running state with no canonical run.json")
-        beads.add_labels(candidate.task_id, ["flow", "blocked", "blocker-run-record-missing"])
-        beads.remove_labels(candidate.task_id, ["running", "reviewing"])
         return
     raise ValueError(f"unknown unstick action: {candidate.action}")
 
@@ -2600,24 +2667,127 @@ def _confirm_repair_merge(root: Path, action: CleanupAction) -> bool:
 
 
 def _auto_review(root: Path, beads: Beads) -> None:
+    config = load_config(root)
     for item in _with_labels(beads.list_active(), {"flow", "reviewing"}):
         if "reviewed" in item.labels:
             continue
         try:
             result = _load_worker_result(root, item.id)
             _review_result(result)
-            beads.add_note(item.id, f"c3x auto-review passed: {result.summary}")
-            beads.add_labels(item.id, ["reviewed"])
             record = _load_repaired_current_run_record(root, item.id)
-            record.status = "reviewed"
-            record.outcome = "reviewed"
-            record.save(run_record_path(root, item.id))
-            console.print(f"[green]Reviewed[/green] {item.id}")
-        except (BeadsError, ValueError) as exc:
+            full_item = beads.show(item.id)
+            review_result = run_reviewer(
+                root,
+                config,
+                full_item,
+                result,
+                record=record,
+                diff_summary=branch_diff_summary(root, record.branch),
+            )
+            _apply_review_result(root, beads, full_item, result, review_result, record=record)
+            if review_result.status == "approved":
+                console.print(f"[green]Reviewed[/green] {item.id}")
+            else:
+                console.print(f"[yellow]Review blocked[/yellow] {item.id}: {len(review_result.issues)} issue(s)")
+        except (AgentError, BeadsError, ValueError) as exc:
             beads.add_note(item.id, f"c3x auto-review blocked: {exc}")
             beads.add_labels(item.id, ["flow", "blocked", "review-blocked"])
             beads.remove_labels(item.id, ["reviewing"])
             console.print(f"[yellow]Review blocked[/yellow] {item.id}: {exc}")
+
+
+def _apply_review_result(
+    root: Path,
+    beads: Beads,
+    item: BeadSummary,
+    worker_result: WorkerResult,
+    review_result: ReviewResult,
+    *,
+    record: RunRecord,
+) -> None:
+    if review_result.task_id != item.id:
+        raise ValueError(f"Reviewer task id is '{review_result.task_id}', not '{item.id}'")
+    if review_result.status == "approved" and review_result.issues:
+        raise ValueError("Reviewer approved with unresolved issues")
+    if review_result.status == "blocked" or review_result.issues:
+        _block_review_with_tasks(beads, item, worker_result, review_result)
+        record.status = "blocked"
+        record.outcome = "review-blocked"
+        record.save(run_record_path(root, item.id))
+        return
+    beads.add_note(item.id, f"c3x review passed: {review_result.summary or worker_result.summary}")
+    beads.add_labels(item.id, ["reviewed", "reviewing"])
+    beads.remove_labels(item.id, ["running", "blocked", "review-blocked", "blocker-review-issues"])
+    record.status = "reviewed"
+    record.outcome = "reviewed"
+    record.save(run_record_path(root, item.id))
+
+
+def _block_review_with_tasks(
+    beads: Beads,
+    item: BeadSummary,
+    worker_result: WorkerResult,
+    review_result: ReviewResult,
+) -> None:
+    issues = review_result.issues or [
+        ReviewIssue(
+            title=f"Resolve review blocker for {item.id}",
+            description=review_result.summary or "Reviewer blocked landing without a structured issue.",
+            severity="high",
+        )
+    ]
+    created_ids: list[str] = []
+    for issue in issues:
+        created = beads.create_task(
+            _review_issue_title(item, issue),
+            description=_review_issue_description(item, worker_result, review_result, issue),
+            labels=["flow", "ready", "review-fix"],
+            issue_type="task",
+            priority=0,
+        )
+        child_id = str(created.get("id", ""))
+        if child_id:
+            created_ids.append(child_id)
+            beads.add_blocker(child_id, item.id)
+    task_list = ", ".join(created_ids) if created_ids else "no cleanup task id returned"
+    beads.add_note(
+        item.id,
+        (
+            f"c3x review blocked: {review_result.summary or 'review issues found'}\n\n"
+            f"Cleanup tasks blocking this item: {task_list}"
+        ),
+    )
+    beads.add_labels(item.id, ["flow", "blocked", "review-blocked", "blocker-review-issues"])
+    beads.remove_labels(item.id, ["running", "reviewing", "reviewed"])
+
+
+def _review_issue_title(item: BeadSummary, issue: ReviewIssue) -> str:
+    return f"Fix review issue for {item.id}: {issue.title}"
+
+
+def _review_issue_description(
+    item: BeadSummary,
+    worker_result: WorkerResult,
+    review_result: ReviewResult,
+    issue: ReviewIssue,
+) -> str:
+    requirements = "\n".join(
+        f"- [{requirement.status}] {requirement.requirement}: {requirement.evidence}"
+        for requirement in review_result.requirements
+    )
+    parts = [
+        f"Review cleanup for blocked task {item.id}: {item.title}.",
+        f"Severity: {issue.severity}",
+        "",
+        issue.description or issue.title,
+        "",
+        f"Reviewer summary: {review_result.summary or 'n/a'}",
+        f"Worker summary: {worker_result.summary or 'n/a'}",
+    ]
+    if requirements:
+        parts.extend(["", "Requirement review:", requirements])
+    parts.extend(["", f"Blocks: {item.id}"])
+    return "\n".join(parts).strip()
 
 
 def _auto_land(root: Path, beads: Beads, *, cleanup_done: bool) -> None:

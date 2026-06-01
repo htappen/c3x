@@ -3,10 +3,11 @@ from pathlib import Path
 from c3x import agent
 from c3x.agent import _agent_command
 from c3x.agent import _next_attempt
+from c3x.agent import _reviewer_prompt
 from c3x.agent import start_conflict_resolver
 from c3x.agent import start_worker
 from c3x.agent import _worker_prompt
-from c3x.schema import RunRecord
+from c3x.schema import RunRecord, WorkerResult
 from c3x.config import C3xConfig
 from c3x.beads import BeadSummary
 
@@ -38,6 +39,29 @@ def test_agent_command_substitutes_runtime_paths(tmp_path: Path) -> None:
         str(tmp_path / "prompt.md"),
         str(tmp_path / "result.json"),
     ]
+
+
+def test_agent_command_uses_reviewer_model_for_reviewer_tasks(tmp_path: Path) -> None:
+    config = C3xConfig.model_validate(
+        {
+            "models": {"codex": {"worker": "worker-model", "reviewer": "reviewer-model"}},
+            "agents": {
+                "codex_command": "fake-codex",
+                "codex_args": ["--model", "{model}", "{prompt}"],
+            },
+        }
+    )
+
+    command = _agent_command(
+        config,
+        tmp_path / "wt",
+        tmp_path / "prompt.md",
+        tmp_path / "result.json",
+        tmp_path / "last.md",
+        task_type="reviewer",
+    )
+
+    assert command == ["fake-codex", "--model", "reviewer-model", str(tmp_path / "prompt.md")]
 
 
 def test_agent_command_can_resume_session(tmp_path: Path) -> None:
@@ -86,6 +110,26 @@ def test_worker_prompt_starts_with_status_probe(tmp_path: Path) -> None:
 
     assert prompt.startswith("/status\n\n")
     assert "preserve the `/status` output in the worker log/transcript" in prompt
+
+
+def test_reviewer_prompt_uses_review_skill_and_embeds_requirements(tmp_path: Path) -> None:
+    prompt = _reviewer_prompt(
+        BeadSummary(
+            id="bd-1",
+            title="Fix auth",
+            description="Redirects preserve query params.",
+            acceptance="Regression test passes.",
+        ),
+        WorkerResult(task_id="bd-1", status="completed", summary="Changed redirects"),
+        tmp_path / "review.json",
+        diff_summary="Diff stat",
+    )
+
+    assert prompt.startswith("/review\n\n")
+    assert "Use the `flow-reviewer` skill." in prompt
+    assert "Redirects preserve query params." in prompt
+    assert "Regression test passes." in prompt
+    assert "Check each requirement explicitly" in prompt
 
 
 def test_retry_and_conflict_prompts_start_with_status_probe(tmp_path: Path) -> None:

@@ -10,7 +10,7 @@ from c3x.config import C3xConfig
 from c3x.gitops import create_conflict_resolution_worktree, create_worktree, task_branch
 from c3x.paths import run_log_dir, run_record_path, runs_dir, worktrees_dir
 from c3x.prompt_policy import caveman_mode_text
-from c3x.schema import RunRecord
+from c3x.schema import ReviewResult, RunRecord, WorkerResult
 
 
 class AgentError(RuntimeError):
@@ -242,6 +242,50 @@ def start_conflict_resolver(
     return record
 
 
+def run_reviewer(
+    root: Path,
+    config: C3xConfig,
+    task: BeadSummary,
+    worker_result: WorkerResult,
+    *,
+    record: RunRecord,
+    diff_summary: str,
+) -> ReviewResult:
+    attempt = _next_attempt(root, task.id)
+    task_type = "reviewer"
+    worktree = Path(record.worktree)
+    log_dir = run_log_dir(root, task.id, task_type, attempt)
+    prompt = log_dir / "prompt.md"
+    result = log_dir / "result.json"
+    last_message = log_dir / "last-message.md"
+    prompt.parent.mkdir(parents=True, exist_ok=True)
+    result.parent.mkdir(parents=True, exist_ok=True)
+    prompt.write_text(
+        _reviewer_prompt(
+            task,
+            worker_result,
+            result,
+            diff_summary=diff_summary,
+        ),
+        encoding="utf-8",
+    )
+
+    command = _agent_command(config, worktree, prompt, result, last_message, task_type=task_type)
+    completed = subprocess.run(
+        command,
+        cwd=worktree,
+        text=True,
+        stdout=(prompt.parent / "stdout.log").open("w", encoding="utf-8"),
+        stderr=(prompt.parent / "stderr.log").open("w", encoding="utf-8"),
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AgentError(f"reviewer exited with status {completed.returncode}")
+    if not result.exists():
+        raise AgentError(f"reviewer did not write result: {result}")
+    return ReviewResult.model_validate_json(result.read_text(encoding="utf-8"))
+
+
 def _agent_command(
     config: C3xConfig,
     worktree: Path,
@@ -258,7 +302,7 @@ def _agent_command(
         prompt_content = prompt.read_text(encoding="utf-8")
 
     mapping = {
-        "model": config.models_for_provider(provider).worker,
+        "model": _model_for_task(config, provider, task_type),
         "worktree": str(worktree),
         "prompt": str(prompt),
         "prompt_content": prompt_content,
@@ -290,6 +334,12 @@ def _agent_command(
 def _provider_for_task(config: C3xConfig, task_type: str) -> str:
     overrides = getattr(config.agents, "provider_overrides", {})
     return overrides.get(task_type, getattr(config.agents, "provider", "codex"))
+
+
+def _model_for_task(config: C3xConfig, provider: str, task_type: str) -> str:
+    models = config.models_for_provider(provider)
+    role = "worker" if task_type in {"worker", "conflict_resolver"} else task_type
+    return getattr(models, role, models.worker)
 
 
 def _next_attempt(root: Path, task_id: str) -> int:
@@ -591,3 +641,82 @@ after this status probe.
 Before editing files, read and follow the root `AGENTS.md` plus any nested
 `AGENTS.md` files that apply to the files you touch.
 """
+
+
+def _reviewer_prompt(
+    task: BeadSummary,
+    worker_result: WorkerResult,
+    result: Path,
+    *,
+    diff_summary: str,
+) -> str:
+    requirements = _task_requirements(task)
+    return f"""/review
+
+{caveman_mode_text()}
+
+Use the `flow-reviewer` skill.
+
+# c3x reviewer task
+
+Task: {task.id}
+Title: {task.title}
+
+Review the current worktree branch. Decide if this work may land.
+
+Supervisor owns all Beads writes, follow-up task creation, commits, merges, and cleanup.
+Do not run `bd update`, `bd close`, `bd create`, `bd dep`, `git commit`, `git push`,
+`git pull`, `git merge`, or branch cleanup.
+
+Requirements to check:
+{requirements}
+
+Worker result:
+```json
+{worker_result.model_dump_json(indent=2)}
+```
+
+Diff summary:
+```text
+{diff_summary}
+```
+
+Check each requirement explicitly. Block landing when any requirement is unmet or unclear,
+verification is missing/failed/skipped without justification, scope is wrong, or evidence is
+not enough.
+
+Write a structured JSON review result to:
+{result}
+
+Required result shape:
+```json
+{{
+  "task_id": "{task.id}",
+  "status": "approved",
+  "summary": "Review decision and evidence",
+  "requirements": [
+    {{"requirement": "specific requirement", "status": "met|unmet|unclear", "evidence": "files/tests/behavior checked"}}
+  ],
+  "issues": [
+    {{"title": "Fix concrete problem", "description": "Issue evidence and expected cleanup", "severity": "critical|high|medium|low"}}
+  ]
+}}
+```
+
+Use `status: "blocked"` when `issues` is non-empty.
+"""
+
+
+def _task_requirements(task: BeadSummary) -> str:
+    lines = [f"- Title: {task.title}"]
+    if task.description:
+        lines.append("- Description:\n" + _indent_block(task.description))
+    if task.acceptance:
+        lines.append("- Acceptance criteria:\n" + _indent_block(task.acceptance))
+    if task.notes:
+        lines.append("- Existing notes:\n" + _indent_block(task.notes))
+    return "\n".join(lines)
+
+
+def _indent_block(text: str) -> str:
+    return "\n".join(f"  {line}" if line else "" for line in text.strip().splitlines())

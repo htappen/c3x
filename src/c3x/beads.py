@@ -76,6 +76,18 @@ class Beads:
         payload = self._run_json(["ready", "--json"])
         return _summaries(payload)
 
+    def dependencies(self, task_id: str, *, direction: str = "down", dep_type: str = "blocks") -> list[dict[str, Any]]:
+        args = ["dep", "list", task_id, "--direction", direction, "--type", dep_type, "--json"]
+        payload = self._run_json(args)
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        if isinstance(payload, dict):
+            for key in ("dependencies", "deps", "items", "results", "data"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+        return []
+
     def show(self, task_id: str) -> BeadSummary:
         payload = self._run_json(["show", task_id, "--json"])
         summaries = _summaries(payload)
@@ -167,6 +179,12 @@ class Beads:
             "--json",
         ]
         return self._run_json(args)
+
+    def add_blocker(self, blocker_id: str, blocked_id: str) -> None:
+        self._run(["dep", blocker_id, "--blocks", blocked_id], expect_json=False)
+
+    def remove_blocker(self, blocker_id: str, blocked_id: str) -> None:
+        self._run(["dep", "remove", blocked_id, blocker_id], expect_json=False)
 
     def _run_json(self, args: list[str]) -> Any:
         result = self._run(args, expect_json=True)

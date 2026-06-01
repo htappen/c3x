@@ -1,6 +1,6 @@
 import pytest
 from c3x.cli import _review_result
-from c3x.schema import VerificationCommand, WorkerResult
+from c3x.schema import ReviewResult, VerificationCommand, WorkerResult
 
 
 def test_review_allows_completed_result() -> None:
@@ -47,3 +47,15 @@ def test_review_fails_on_non_completed_status() -> None:
     with pytest.raises(ValueError, match="Worker status is 'blocked'"):
         _review_result(result)
 
+
+def test_review_result_accepts_string_issues() -> None:
+    result = ReviewResult.model_validate(
+        {
+            "task_id": "bd-1",
+            "status": "blocked",
+            "issues": ["Missing regression test"],
+        }
+    )
+
+    assert result.issues[0].title == "Missing regression test"
+    assert result.issues[0].severity == "high"

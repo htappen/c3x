@@ -46,6 +46,46 @@ class WorkerResult(BaseModel):
         return normalized
 
 
+class ReviewIssue(BaseModel):
+    title: str
+    description: str = ""
+    severity: Literal["critical", "high", "medium", "low"] = "high"
+
+    @field_validator("title", mode="after")
+    @classmethod
+    def _title_required(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("review issue title cannot be empty")
+        return value.strip()
+
+
+class RequirementReview(BaseModel):
+    requirement: str
+    status: Literal["met", "unmet", "unclear"]
+    evidence: str = ""
+
+
+class ReviewResult(BaseModel):
+    task_id: str
+    status: Literal["approved", "blocked"]
+    summary: str = ""
+    requirements: list[RequirementReview] = Field(default_factory=list)
+    issues: list[ReviewIssue] = Field(default_factory=list)
+
+    @field_validator("issues", mode="before")
+    @classmethod
+    def _normalize_issues(cls, value: object) -> object:
+        if not isinstance(value, list):
+            return value
+        normalized: list[object] = []
+        for item in value:
+            if isinstance(item, str):
+                normalized.append({"title": item, "description": item, "severity": "high"})
+            else:
+                normalized.append(item)
+        return normalized
+
+
 class RunRecord(BaseModel):
     task_id: str
     branch: str

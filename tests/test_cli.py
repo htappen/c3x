@@ -5,7 +5,7 @@ from typer.testing import CliRunner
 
 from c3x import cli
 from c3x.beads import BeadSummary
-from c3x.schema import RunRecord, WorkerResult
+from c3x.schema import ReviewResult, RunRecord, WorkerResult
 
 
 class _FakeBeads:
@@ -44,6 +44,9 @@ class _StatusBeads:
     def ready(self) -> list[BeadSummary]:
         return [BeadSummary(id="bd-6", title="ready", labels=("flow", "ready"))]
 
+    def dependencies(self, task_id: str, *, direction: str = "down", dep_type: str = "blocks") -> list[dict[str, str]]:
+        return []
+
 
 class _RecordingBeads:
     def __init__(self) -> None:
@@ -54,6 +57,8 @@ class _RecordingBeads:
         self.statuses: list[tuple[str, str]] = []
         self.closed: list[tuple[str, str]] = []
         self.compacted: list[tuple[str, str]] = []
+        self.blockers: list[tuple[str, str]] = []
+        self.removed_blockers: list[tuple[str, str]] = []
         self.next_id = 1
 
     def create_inbox_item(
@@ -103,6 +108,15 @@ class _RecordingBeads:
     def ready(self) -> list[BeadSummary]:
         return [item for item in self.items.values() if "ready" in item.labels]
 
+    def dependencies(self, task_id: str, *, direction: str = "down", dep_type: str = "blocks") -> list[dict[str, str]]:
+        if direction != "down" or dep_type != "blocks":
+            return []
+        return [
+            {"issue_id": task_id, "depends_on_id": blocker_id, "type": dep_type}
+            for blocker_id, blocked_id in self.blockers
+            if blocked_id == task_id
+        ]
+
     def show(self, task_id: str) -> BeadSummary:
         return self.items[task_id]
 
@@ -130,6 +144,14 @@ class _RecordingBeads:
     def close(self, task_id: str, note: str) -> None:
         self.closed.append((task_id, note))
         self.items.pop(task_id, None)
+
+    def add_blocker(self, blocker_id: str, blocked_id: str) -> None:
+        self.blockers.append((blocker_id, blocked_id))
+
+    def remove_blocker(self, blocker_id: str, blocked_id: str) -> None:
+        self.removed_blockers.append((blocker_id, blocked_id))
+        if (blocker_id, blocked_id) in self.blockers:
+            self.blockers.remove((blocker_id, blocked_id))
 
     def compact_issue(self, task_id: str, summary: str, *, issue: BeadSummary | None = None) -> None:
         self.compacted.append((task_id, summary))
@@ -1154,6 +1176,67 @@ def test_import_completed_result_survives_beads_write_failure(tmp_path: Path) ->
     assert (run_dir / "result.json").exists()
 
 
+def test_apply_review_result_creates_blocking_cleanup_tasks(tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="fix auth",
+        description="Preserve redirect params.",
+        labels=("flow", "reviewing"),
+    )
+    beads.next_id = 2
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    record = RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix-auth",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-auth"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="completed",
+    )
+    worker_result = WorkerResult(task_id="bd-1", status="completed", summary="Changed redirect handling")
+    review_result = ReviewResult.model_validate(
+        {
+            "task_id": "bd-1",
+            "status": "blocked",
+            "summary": "Acceptance not met",
+            "requirements": [
+                {
+                    "requirement": "Preserve redirect params",
+                    "status": "unmet",
+                    "evidence": "No regression test",
+                }
+            ],
+            "issues": [
+                {
+                    "title": "Add regression test for redirect params",
+                    "description": "Test and fix missing redirect query preservation.",
+                    "severity": "high",
+                }
+            ],
+        }
+    )
+
+    cli._apply_review_result(
+        tmp_path,
+        beads,
+        beads.items["bd-1"],
+        worker_result,
+        review_result,
+        record=record,
+    )
+
+    saved = RunRecord.load(run_dir / "run.json")
+    cleanup_ids = [item_id for item_id in beads.items if item_id != "bd-1"]
+    assert saved.status == "blocked"
+    assert saved.outcome == "review-blocked"
+    assert cleanup_ids
+    assert beads.items[cleanup_ids[0]].priority == 0
+    assert beads.blockers == [(cleanup_ids[0], "bd-1")]
+    assert ("bd-1", ["flow", "blocked", "review-blocked", "blocker-review-issues"]) in beads.added_labels
+
+
 def test_recover_interrupted_worker_resumes_transient_session(monkeypatch, tmp_path: Path) -> None:
     beads = _RecordingBeads()
     beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", labels=("flow", "running"))
@@ -1465,6 +1548,69 @@ def test_retry_defaults_to_resuming_previous_session(monkeypatch, tmp_path: Path
     assert resumed == ["019e61af-8603-7b53-8099-9284e6bc16bd"]
     assert RunRecord.load(run_dir / "run.json").attempt == 2
     assert ("bd-1", ["flow", "running", "attempt-2"]) in beads.added_labels
+
+
+def test_retry_clears_review_cleanup_blockers(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="fix",
+        status="blocked",
+        labels=("flow", "blocked", "review-blocked", "blocker-review-issues"),
+    )
+    beads.items["bd-2"] = BeadSummary(
+        id="bd-2",
+        title="Fix review issue for bd-1: add test",
+        description="Blocks: bd-1\n\nAdd missing test.",
+        labels=("flow", "ready", "review-fix"),
+    )
+    beads.blockers.append(("bd-2", "bd-1"))
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    worktree.mkdir(parents=True)
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(worktree / ".c3x" / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="blocked",
+        attempt=1,
+    ).save(run_dir / "run.json")
+
+    def fake_start_worker(
+        root: Path,
+        config: object,
+        task: BeadSummary,
+        *,
+        attempt: int | None = None,
+    ) -> RunRecord:
+        record = RunRecord(
+            task_id=task.id,
+            branch="c3x/bd-1-fix-attempt-2",
+            worktree=str(root / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-2"),
+            prompt=str(root / ".flow" / "runs" / task.id / "prompt.md"),
+            result=str(root / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-2" / ".c3x" / "result.json"),
+            last_message=str(root / ".flow" / "runs" / task.id / "last-message.md"),
+            attempt=attempt or 2,
+        )
+        record.save(root / ".flow" / "runs" / task.id / "run.json")
+        return record
+
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "load_config", lambda root: object())
+    monkeypatch.setattr(cli, "current_branch", lambda root: "feature")
+    monkeypatch.setattr(cli, "start_worker", fake_start_worker)
+
+    result = runner.invoke(cli.app, ["retry", "bd-1", "--fresh"])
+
+    assert result.exit_code == 0
+    assert ("bd-2", "bd-1") in beads.removed_blockers
+    assert ("bd-2", "Superseded by retry of bd-1") in beads.closed
+    assert any("cleared 1 superseded review cleanup" in note for item_id, note in beads.notes if item_id == "bd-1")
 
 
 def test_retry_can_continue_existing_worktree_with_fresh_context(monkeypatch, tmp_path: Path) -> None:
@@ -2281,6 +2427,54 @@ def test_unstick_fix_marks_completed_result_reviewing(monkeypatch, tmp_path: Pat
     removed = [labels[0] for item_id, labels in beads.removed_labels if item_id == "bd-1"]
     assert "blocker-result-missing" in removed
     assert "landed" in removed
+
+
+def test_unstick_does_not_clear_review_cleanup_blockers(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="fix",
+        status="in_progress",
+        labels=("flow", "blocked", "review-blocked", "blocker-review-issues"),
+    )
+    beads.items["bd-2"] = BeadSummary(
+        id="bd-2",
+        title="Fix review issue for bd-1: add test",
+        description="Blocks: bd-1\n\nAdd missing test.",
+        labels=("flow", "ready", "review-fix"),
+    )
+    beads.blockers.append(("bd-2", "bd-1"))
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    result_path = worktree / ".c3x" / "result.json"
+    result_path.parent.mkdir(parents=True)
+    result_path.write_text(
+        WorkerResult(task_id="bd-1", status="completed", summary="done").model_dump_json(),
+        encoding="utf-8",
+    )
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(result_path),
+        last_message=str(run_dir / "last-message.md"),
+        status="blocked",
+        outcome="review-blocked",
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+
+    result = runner.invoke(cli.app, ["unstick", "bd-1", "--fix", "--verify", "none"])
+    candidates = cli._unstick_candidates(tmp_path, beads, task_id="bd-1", verify_mode="none")
+
+    assert result.exit_code == 0
+    assert "Skipped" in result.stdout
+    assert candidates[0].verification_issues == ("open review cleanup blockers must be fixed first: bd-2",)
+    assert beads.blockers == [("bd-2", "bd-1")]
+    assert "bd-2" in beads.items
+    assert RunRecord.load(run_dir / "run.json").status == "blocked"
 
 
 def test_unstick_fix_skips_recorded_verification_gap_by_default(monkeypatch, tmp_path: Path) -> None:
