@@ -256,7 +256,7 @@ def run_reviewer(
     worktree = Path(record.worktree)
     log_dir = run_log_dir(root, task.id, task_type, attempt)
     prompt = log_dir / "prompt.md"
-    result = log_dir / "result.json"
+    result = worktree / ".c3x" / "reviewer-result.json"
     last_message = log_dir / "last-message.md"
     prompt.parent.mkdir(parents=True, exist_ok=True)
     result.parent.mkdir(parents=True, exist_ok=True)

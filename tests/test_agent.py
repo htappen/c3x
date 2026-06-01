@@ -4,6 +4,7 @@ from c3x import agent
 from c3x.agent import _agent_command
 from c3x.agent import _next_attempt
 from c3x.agent import _reviewer_prompt
+from c3x.agent import run_reviewer
 from c3x.agent import start_conflict_resolver
 from c3x.agent import start_worker
 from c3x.agent import _worker_prompt
@@ -326,6 +327,60 @@ def test_start_worker_uses_worker_provider_override(monkeypatch, tmp_path: Path)
     assert launched["command"][0] == "fake-agy"
     assert record.provider == "antigravity"
     assert record.task_type == "worker"
+
+
+def test_run_reviewer_writes_result_inside_worktree_c3x(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    worktree.mkdir(parents=True)
+    record = RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(tmp_path / ".flow" / "runs" / "bd-1" / "worker-attempt-1" / "prompt.md"),
+        result=str(worktree / ".c3x" / "result.json"),
+        last_message=str(tmp_path / ".flow" / "runs" / "bd-1" / "worker-attempt-1" / "last-message.md"),
+    )
+    config = C3xConfig.model_validate(
+        {
+            "agents": {
+                "codex_command": "fake-codex",
+                "codex_args": ["{prompt}", "{result}"],
+            }
+        }
+    )
+
+    def fake_run(command: list[str], **kwargs: object) -> object:
+        result = Path(command[-1])
+        captured["command"] = command
+        captured["cwd"] = kwargs["cwd"]
+        result.write_text(
+            '{"task_id":"bd-1","status":"approved","summary":"ok","requirements":[],"issues":[]}',
+            encoding="utf-8",
+        )
+
+        class Completed:
+            returncode = 0
+
+        return Completed()
+
+    monkeypatch.setattr(agent.subprocess, "run", fake_run)
+
+    review = run_reviewer(
+        tmp_path,
+        config,
+        BeadSummary(id="bd-1", title="Fix auth"),
+        WorkerResult(task_id="bd-1", status="completed", summary="done"),
+        record=record,
+        diff_summary="diff",
+    )
+
+    result = worktree / ".c3x" / "reviewer-result.json"
+    assert review.status == "approved"
+    assert result.exists()
+    assert captured["cwd"] == worktree
+    assert captured["command"][-1] == str(result)
+    assert not (tmp_path / ".flow" / "runs" / "bd-1" / "reviewer-attempt-1" / "result.json").exists()
 
 
 def test_next_attempt_uses_record_and_worktree_suffixes(tmp_path: Path) -> None:
