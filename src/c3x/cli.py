@@ -714,7 +714,8 @@ def unstick(
         raise typer.Exit(_error("--verify must be cheap or none"))
     try:
         beads = _beads(root)
-        candidates = _unstick_candidates(root, beads, task_id=task_id, verify_mode=verify_mode)
+        candidate_verify_mode = "recorded" if dry_run and verify_mode == "cheap" else verify_mode
+        candidates = _unstick_candidates(root, beads, task_id=task_id, verify_mode=candidate_verify_mode)
         if not candidates:
             console.print("[green]No stuck c3x state detected.[/green]")
             return
@@ -1715,6 +1716,45 @@ def _review_cleanup_verification_issues(beads: Beads, task_id: str) -> tuple[str
     return (f"open review cleanup blockers must be fixed first: {task_list}",)
 
 
+def _review_cleanup_index(items: list[BeadSummary]) -> dict[str, list[BeadSummary]]:
+    cleanup_by_blocked: dict[str, list[BeadSummary]] = {}
+    for item in items:
+        if "review-fix" not in item.labels:
+            continue
+        blocked_id = _blocked_item_id(item)
+        if blocked_id:
+            cleanup_by_blocked.setdefault(blocked_id, []).append(item)
+    return cleanup_by_blocked
+
+
+def _review_cleanup_verification_issues_from_index(
+    cleanup_by_blocked: dict[str, list[BeadSummary]],
+    task_id: str,
+) -> tuple[str, ...]:
+    cleanup_tasks = _review_cleanup_tasks_from_index(cleanup_by_blocked, task_id)
+    if not cleanup_tasks:
+        return ()
+    task_list = ", ".join(task.id for task in cleanup_tasks)
+    return (f"open review cleanup blockers must be fixed first: {task_list}",)
+
+
+def _review_cleanup_tasks_from_index(
+    cleanup_by_blocked: dict[str, list[BeadSummary]],
+    task_id: str,
+    *,
+    seen: set[str] | None = None,
+) -> list[BeadSummary]:
+    seen = seen or {task_id}
+    cleanup_tasks: list[BeadSummary] = []
+    for cleanup in cleanup_by_blocked.get(task_id, []):
+        if cleanup.id in seen:
+            continue
+        seen.add(cleanup.id)
+        cleanup_tasks.append(cleanup)
+        cleanup_tasks.extend(_review_cleanup_tasks_from_index(cleanup_by_blocked, cleanup.id, seen=seen))
+    return cleanup_tasks
+
+
 def _resolve_conflict_task(root: Path, config: object, beads: Beads, task_id: str) -> RunRecord:
     task = beads.show(task_id)
     _ensure_retryable(root, task_id)
@@ -2349,13 +2389,22 @@ def _is_missing_ref_error(exc: GitError) -> bool:
 
 
 def _unstick_candidates(root: Path, beads: Beads, *, task_id: str | None, verify_mode: str) -> list[UnstickCandidate]:
-    items = [beads.show(task_id)] if task_id else _with_labels(beads.list_active(), {"flow"})
+    active_items = _with_labels(beads.list_active(), {"flow"})
+    items = [beads.show(task_id)] if task_id else active_items
+    cleanup_by_blocked = _review_cleanup_index(active_items)
+    run_records = _run_record_paths(root)
+    records_by_task = {
+        record.task_id: record
+        for path, record in run_records
+        if path == run_record_path(root, record.task_id)
+    }
     candidates: list[UnstickCandidate] = []
+    conflict_scan: bool | None = None
     for item in items:
-        review_cleanup_issues = _review_cleanup_verification_issues(beads, item.id)
-        completed_evidence = _completed_result_evidence(root, item.id)
+        completed_evidence = _completed_result_evidence(root, item.id, run_records=run_records)
         if completed_evidence is not None and _needs_completed_result_state_repair(item, completed_evidence[0]):
             record, result = completed_evidence
+            review_cleanup_issues = _review_cleanup_verification_issues_from_index(cleanup_by_blocked, item.id)
             candidates.append(
                 UnstickCandidate(
                     task_id=item.id,
@@ -2369,8 +2418,8 @@ def _unstick_candidates(root: Path, beads: Beads, *, task_id: str | None, verify
             )
             continue
 
-        record_path = run_record_path(root, item.id)
-        if not record_path.exists():
+        record = records_by_task.get(item.id)
+        if record is None:
             if "running" in item.labels:
                 candidates.append(
                     UnstickCandidate(
@@ -2382,7 +2431,6 @@ def _unstick_candidates(root: Path, beads: Beads, *, task_id: str | None, verify
                     )
                 )
             continue
-        record = RunRecord.load(record_path)
         stale_running = "running" in item.labels and (
             record.status != "running" or record.pid is None or not _process_is_running(record.pid)
         )
@@ -2391,10 +2439,18 @@ def _unstick_candidates(root: Path, beads: Beads, *, task_id: str | None, verify
         if not (stale_running or stale_terminal or stale_review):
             continue
 
+        review_cleanup_issues = _review_cleanup_verification_issues_from_index(cleanup_by_blocked, item.id)
         verification_issues: tuple[str, ...] = ()
         cheap_commands: tuple[str, ...] = ()
-        if verify_mode == "cheap" and record.status in {"completed", "reviewed", "landed"}:
-            verification_issues, cheap_commands = _cheap_unstick_verification(root, record)
+        if verify_mode in {"cheap", "recorded"} and record.status in {"completed", "reviewed", "landed"}:
+            if conflict_scan is None:
+                conflict_scan = _scan_conflict_markers(root)
+            verification_issues, cheap_commands = _cheap_unstick_verification(
+                root,
+                record,
+                conflict_scan=conflict_scan,
+                run_commands=verify_mode == "cheap",
+            )
         verification_issues = (*verification_issues, *review_cleanup_issues)
 
         if record.status == "landed":
@@ -2440,9 +2496,16 @@ def _unstick_candidates(root: Path, beads: Beads, *, task_id: str | None, verify
     return candidates
 
 
-def _completed_result_evidence(root: Path, task_id: str) -> tuple[RunRecord, WorkerResult] | None:
+def _completed_result_evidence(
+    root: Path,
+    task_id: str,
+    *,
+    run_records: list[tuple[Path, RunRecord]] | None = None,
+) -> tuple[RunRecord, WorkerResult] | None:
+    if run_records is None:
+        run_records = _run_record_paths(root)
     matches: list[tuple[float, RunRecord, WorkerResult]] = []
-    for record_path, record in _run_record_paths(root):
+    for record_path, record in run_records:
         if record.task_id != task_id:
             continue
         result_path_for_record = _result_file_for_record(record)
@@ -2486,7 +2549,13 @@ def _needs_completed_result_state_repair(item: BeadSummary, record: RunRecord) -
     return False
 
 
-def _cheap_unstick_verification(root: Path, record: RunRecord) -> tuple[tuple[str, ...], tuple[str, ...]]:
+def _cheap_unstick_verification(
+    root: Path,
+    record: RunRecord,
+    *,
+    conflict_scan: bool | None = None,
+    run_commands: bool = True,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
     issues: list[str] = []
     raw = _read_result_payload(root, record)
     result = raw.get("result")
@@ -2507,12 +2576,13 @@ def _cheap_unstick_verification(root: Path, record: RunRecord) -> tuple[tuple[st
         if _looks_like_recorded_failure(command):
             issues.append(f"recorded verification gap: {command}")
 
-    conflict_scan = _scan_conflict_markers(root)
+    if conflict_scan is None:
+        conflict_scan = _scan_conflict_markers(root)
     if conflict_scan:
         issues.append("conflict markers remain in final tree")
 
     cheap_commands = tuple(command for command in verification_values if _is_cheap_verification_command(command))
-    if cheap_commands:
+    if run_commands and cheap_commands:
         issues.extend(_cheap_verification_issues(root, list(cheap_commands)))
     return tuple(issues), cheap_commands
 

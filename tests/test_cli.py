@@ -2816,7 +2816,11 @@ def test_unstick_defaults_to_dry_run_with_cheap_verification(monkeypatch, tmp_pa
     monkeypatch.setattr(cli, "_root", lambda: tmp_path)
     monkeypatch.setattr(cli, "_beads", lambda root: beads)
     monkeypatch.setattr(cli, "is_ancestor", lambda root, branch, descendant: True)
-    monkeypatch.setattr(cli, "run_verification", lambda root, commands: [])
+    monkeypatch.setattr(
+        cli,
+        "run_verification",
+        lambda root, commands: (_ for _ in ()).throw(AssertionError("dry-run should not run verification")),
+    )
 
     result = runner.invoke(cli.app, ["unstick"])
 
@@ -2824,6 +2828,29 @@ def test_unstick_defaults_to_dry_run_with_cheap_verification(monkeypatch, tmp_pa
     assert "bd-1" in result.stdout
     assert "Dry run only" in result.stdout
     assert "bd-1" in beads.items
+
+
+def test_unstick_scans_run_records_once_and_defers_cleanup_lookup(monkeypatch, tmp_path: Path) -> None:
+    class FastUnstickBeads(_RecordingBeads):
+        def dependencies(self, task_id: str, *, direction: str = "down", dep_type: str = "blocks") -> list[dict[str, str]]:
+            raise AssertionError("cleanup dependencies should only be checked for repair candidates")
+
+    beads = FastUnstickBeads()
+    beads.items["bd-1"] = BeadSummary(id="bd-1", title="queued", labels=("flow", "ready"))
+    beads.items["bd-2"] = BeadSummary(id="bd-2", title="inbox", labels=("flow", "inbox"))
+    calls = 0
+
+    def fake_run_record_paths(root: Path) -> list[tuple[Path, RunRecord]]:
+        nonlocal calls
+        calls += 1
+        return []
+
+    monkeypatch.setattr(cli, "_run_record_paths", fake_run_record_paths)
+
+    candidates = cli._unstick_candidates(tmp_path, beads, task_id=None, verify_mode="none")
+
+    assert candidates == []
+    assert calls == 1
 
 
 def test_unstick_does_not_close_contained_dirty_worktree(monkeypatch, tmp_path: Path) -> None:
