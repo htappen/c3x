@@ -1509,15 +1509,32 @@ def _is_review_fix(task: BeadSummary) -> bool:
 def _review_fix_source_record(root: Path, beads: Beads, task: BeadSummary) -> RunRecord | None:
     if not _is_review_fix(task):
         return None
-    parent_id = _review_fix_parent_id(beads, task)
-    if not parent_id:
+    ancestor_id = _review_fix_ancestor_id(beads, task)
+    if not ancestor_id:
         return None
-    record = _current_run_record(root, parent_id)
+    record = _current_run_record(root, ancestor_id)
     if record is None:
         return None
     if not Path(record.worktree).exists():
         return None
     return record
+
+
+def _review_fix_ancestor_id(beads: Beads, task: BeadSummary) -> str | None:
+    seen = {task.id}
+    current = task
+    while True:
+        parent_id = _review_fix_parent_id(beads, current)
+        if not parent_id or parent_id in seen:
+            return None
+        seen.add(parent_id)
+        try:
+            parent = beads.show(parent_id)
+        except BeadsError:
+            return parent_id
+        if not _is_review_fix(parent):
+            return parent_id
+        current = parent
 
 
 def _review_fix_parent_id(beads: Beads, task: BeadSummary) -> str | None:

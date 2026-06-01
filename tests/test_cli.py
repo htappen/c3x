@@ -1834,6 +1834,186 @@ def test_dispatch_review_fix_uses_source_worktree(monkeypatch, tmp_path: Path) -
     assert record.worktree == str(source_worktree)
 
 
+def test_retry_nested_review_fix_fresh_uses_original_ancestor_worktree(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="original",
+        labels=("flow", "blocked", "review-blocked"),
+    )
+    beads.items["bd-2"] = BeadSummary(
+        id="bd-2",
+        title="Fix first review issue",
+        description="Blocks: bd-1\n\nFirst cleanup.",
+        labels=("flow", "blocked", "review-fix"),
+    )
+    beads.items["bd-3"] = BeadSummary(
+        id="bd-3",
+        title="Fix nested review issue",
+        description="Blocks: bd-2\n\nNested cleanup.",
+        labels=("flow", "ready", "review-fix"),
+    )
+    original_run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    original_worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    nested_worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-2-fix"
+    original_worktree.mkdir(parents=True)
+    nested_worktree.mkdir(parents=True)
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(original_worktree),
+        prompt=str(original_run_dir / "prompt.md"),
+        result=str(original_worktree / ".c3x" / "result.json"),
+        last_message=str(original_run_dir / "last-message.md"),
+        status="blocked",
+    ).save(original_run_dir / "run.json")
+    RunRecord(
+        task_id="bd-2",
+        branch="c3x/bd-1-fix",
+        worktree=str(nested_worktree),
+        prompt=str(tmp_path / ".flow" / "runs" / "bd-2" / "prompt.md"),
+        result=str(nested_worktree / ".c3x" / "result.json"),
+        last_message=str(tmp_path / ".flow" / "runs" / "bd-2" / "last-message.md"),
+        status="blocked",
+    ).save(tmp_path / ".flow" / "runs" / "bd-2" / "run.json")
+    continued: list[str] = []
+
+    def fake_continue_worktree_worker(
+        root: Path,
+        config: object,
+        task: BeadSummary,
+        previous: RunRecord,
+        *,
+        reason: str = "",
+        attempt: int | None = None,
+    ) -> RunRecord:
+        continued.append(previous.worktree)
+        record = RunRecord(
+            task_id=task.id,
+            branch=previous.branch,
+            worktree=previous.worktree,
+            prompt=str(root / ".flow" / "runs" / task.id / "prompt.md"),
+            result=str(Path(previous.worktree) / ".c3x" / "result.json"),
+            last_message=str(root / ".flow" / "runs" / task.id / "last-message.md"),
+            attempt=attempt or 1,
+        )
+        record.save(root / ".flow" / "runs" / task.id / "run.json")
+        return record
+
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "load_config", lambda root: object())
+    monkeypatch.setattr(cli, "current_branch", lambda root: "c3x/bd-1-fix")
+    monkeypatch.setattr(cli, "continue_worktree_worker", fake_continue_worktree_worker)
+    monkeypatch.setattr(
+        cli,
+        "start_worker",
+        lambda root, config, task, attempt=None: (_ for _ in ()).throw(AssertionError("must use ancestor worktree")),
+    )
+
+    result = runner.invoke(cli.app, ["retry", "bd-3", "--fresh"])
+
+    assert result.exit_code == 0
+    assert continued == [str(original_worktree)]
+    saved = RunRecord.load(tmp_path / ".flow" / "runs" / "bd-3" / "run.json")
+    assert saved.worktree == str(original_worktree)
+
+
+def test_dispatch_nested_review_fix_uses_original_ancestor_worktree(monkeypatch, tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(id="bd-1", title="original", labels=("flow", "blocked"))
+    beads.items["bd-2"] = BeadSummary(
+        id="bd-2",
+        title="first review fix",
+        description="Blocks: bd-1\n\nFirst cleanup.",
+        labels=("flow", "blocked", "review-fix"),
+    )
+    cleanup = BeadSummary(
+        id="bd-3",
+        title="nested review fix",
+        description="Blocks: bd-2\n\nNested cleanup.",
+        labels=("flow", "ready", "review-fix"),
+    )
+    beads.items[cleanup.id] = cleanup
+    original_run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    original_worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    original_worktree.mkdir(parents=True)
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(original_worktree),
+        prompt=str(original_run_dir / "prompt.md"),
+        result=str(original_worktree / ".c3x" / "result.json"),
+        last_message=str(original_run_dir / "last-message.md"),
+        status="blocked",
+    ).save(original_run_dir / "run.json")
+    continued: list[tuple[str, str]] = []
+
+    def fake_continue_worktree_worker(
+        root: Path,
+        config: object,
+        task: BeadSummary,
+        previous: RunRecord,
+        *,
+        reason: str = "",
+        attempt: int | None = None,
+    ) -> RunRecord:
+        continued.append((task.id, previous.worktree))
+        return RunRecord(
+            task_id=task.id,
+            branch=previous.branch,
+            worktree=previous.worktree,
+            prompt=str(root / ".flow" / "runs" / task.id / "prompt.md"),
+            result=str(Path(previous.worktree) / ".c3x" / "result.json"),
+            last_message=str(root / ".flow" / "runs" / task.id / "last-message.md"),
+            attempt=attempt or 1,
+        )
+
+    monkeypatch.setattr(cli, "continue_worktree_worker", fake_continue_worktree_worker)
+
+    record = cli._start_ready_worker(tmp_path, object(), beads, cleanup)
+
+    assert continued == [("bd-3", str(original_worktree))]
+    assert record.worktree == str(original_worktree)
+
+
+def test_review_fix_cycle_falls_back_to_normal_worker(monkeypatch, tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    task = BeadSummary(
+        id="bd-1",
+        title="cycle",
+        description="Blocks: bd-2\n\nCycle part one.",
+        labels=("flow", "ready", "review-fix"),
+    )
+    beads.items["bd-1"] = task
+    beads.items["bd-2"] = BeadSummary(
+        id="bd-2",
+        title="cycle",
+        description="Blocks: bd-1\n\nCycle part two.",
+        labels=("flow", "ready", "review-fix"),
+    )
+    started: list[str] = []
+
+    def fake_start_worker(root: Path, config: object, task: BeadSummary) -> RunRecord:
+        started.append(task.id)
+        return RunRecord(
+            task_id=task.id,
+            branch="c3x/bd-1",
+            worktree=str(root / ".flow" / "worktrees" / "bd-1"),
+            prompt=str(root / ".flow" / "runs" / task.id / "prompt.md"),
+            result=str(root / ".flow" / "worktrees" / "bd-1" / ".c3x" / "result.json"),
+            last_message=str(root / ".flow" / "runs" / task.id / "last-message.md"),
+        )
+
+    monkeypatch.setattr(cli, "start_worker", fake_start_worker)
+
+    record = cli._start_ready_worker(tmp_path, object(), beads, task)
+
+    assert started == ["bd-1"]
+    assert record.task_id == "bd-1"
+
+
 def test_retry_can_continue_existing_worktree_with_fresh_context(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _RecordingBeads()
