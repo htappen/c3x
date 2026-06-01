@@ -1489,17 +1489,17 @@ def _retry_task(
 
 
 def _clear_review_cleanup_blockers(beads: Beads, task: BeadSummary) -> None:
-    cleanup_tasks = _review_cleanup_tasks(beads, task.id)
-    if not cleanup_tasks:
+    cleanup_edges = _review_cleanup_task_edges(beads, task.id)
+    if not cleanup_edges:
         return
-    for cleanup in cleanup_tasks:
+    for cleanup, blocked_id in reversed(cleanup_edges):
         try:
-            beads.remove_blocker(cleanup.id, task.id)
+            beads.remove_blocker(cleanup.id, blocked_id)
         except BeadsError:
             raise
         if cleanup.status != "closed":
             beads.close(cleanup.id, f"Superseded by retry of {task.id}")
-    beads.add_note(task.id, f"c3x retry cleared {len(cleanup_tasks)} superseded review cleanup task(s)")
+    beads.add_note(task.id, f"c3x retry cleared {len(cleanup_edges)} superseded review cleanup task(s)")
 
 
 def _is_review_fix(task: BeadSummary) -> bool:
@@ -1553,6 +1553,27 @@ def _review_fix_parent_id(beads: Beads, task: BeadSummary) -> str | None:
 
 
 def _review_cleanup_tasks(beads: Beads, task_id: str) -> list[BeadSummary]:
+    return [cleanup for cleanup, _ in _review_cleanup_task_edges(beads, task_id)]
+
+
+def _review_cleanup_task_edges(
+    beads: Beads,
+    task_id: str,
+    *,
+    seen: set[str] | None = None,
+) -> list[tuple[BeadSummary, str]]:
+    seen = seen or {task_id}
+    cleanup_edges: list[tuple[BeadSummary, str]] = []
+    for cleanup in _direct_review_cleanup_tasks(beads, task_id):
+        if cleanup.id in seen:
+            continue
+        seen.add(cleanup.id)
+        cleanup_edges.append((cleanup, task_id))
+        cleanup_edges.extend(_review_cleanup_task_edges(beads, cleanup.id, seen=seen))
+    return cleanup_edges
+
+
+def _direct_review_cleanup_tasks(beads: Beads, task_id: str) -> list[BeadSummary]:
     cleanup_by_id: dict[str, BeadSummary] = {}
     for item in beads.list_active():
         if "review-fix" in item.labels and _blocked_item_id(item) == task_id:

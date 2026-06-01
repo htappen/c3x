@@ -1687,6 +1687,78 @@ def test_retry_clears_review_cleanup_blockers(monkeypatch, tmp_path: Path) -> No
     assert any("cleared 1 superseded review cleanup" in note for item_id, note in beads.notes if item_id == "bd-1")
 
 
+def test_retry_clears_nested_review_cleanup_blockers(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="fix",
+        status="blocked",
+        labels=("flow", "blocked", "review-blocked", "blocker-review-issues"),
+    )
+    beads.items["bd-2"] = BeadSummary(
+        id="bd-2",
+        title="Fix review issue for bd-1",
+        description="Blocks: bd-1\n\nFirst cleanup.",
+        labels=("flow", "blocked", "review-fix"),
+    )
+    beads.items["bd-3"] = BeadSummary(
+        id="bd-3",
+        title="Fix review issue for bd-2",
+        description="Blocks: bd-2\n\nNested cleanup.",
+        labels=("flow", "ready", "review-fix"),
+    )
+    beads.blockers.extend([("bd-2", "bd-1"), ("bd-3", "bd-2")])
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    worktree.mkdir(parents=True)
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(worktree / ".c3x" / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="blocked",
+        attempt=1,
+    ).save(run_dir / "run.json")
+
+    def fake_start_worker(
+        root: Path,
+        config: object,
+        task: BeadSummary,
+        *,
+        attempt: int | None = None,
+    ) -> RunRecord:
+        record = RunRecord(
+            task_id=task.id,
+            branch="c3x/bd-1-fix-attempt-2",
+            worktree=str(root / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-2"),
+            prompt=str(root / ".flow" / "runs" / task.id / "prompt.md"),
+            result=str(root / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-2" / ".c3x" / "result.json"),
+            last_message=str(root / ".flow" / "runs" / task.id / "last-message.md"),
+            attempt=attempt or 2,
+        )
+        record.save(root / ".flow" / "runs" / task.id / "run.json")
+        return record
+
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "load_config", lambda root: object())
+    monkeypatch.setattr(cli, "current_branch", lambda root: "feature")
+    monkeypatch.setattr(cli, "start_worker", fake_start_worker)
+
+    result = runner.invoke(cli.app, ["retry", "bd-1", "--fresh"])
+
+    assert result.exit_code == 0
+    assert beads.removed_blockers == [("bd-3", "bd-2"), ("bd-2", "bd-1")]
+    assert ("bd-2", "Superseded by retry of bd-1") in beads.closed
+    assert ("bd-3", "Superseded by retry of bd-1") in beads.closed
+    assert any("cleared 2 superseded review cleanup" in note for item_id, note in beads.notes if item_id == "bd-1")
+    assert "bd-2" not in beads.items
+    assert "bd-3" not in beads.items
+
+
 def test_retry_review_fix_fresh_uses_source_worktree(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _RecordingBeads()
