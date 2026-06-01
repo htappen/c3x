@@ -1206,7 +1206,7 @@ def _supervisor_tick(
                 break
             if "flow" in task.labels:
                 _write_activity(root, f"dispatching worker {task.id}")
-                start_worker(root, config, task)
+                _start_ready_worker(root, config, beads, task)
                 beads.set_status(task.id, "in_progress")
                 beads.add_labels(task.id, ["flow", "running"])
                 beads.remove_labels(task.id, ["ready", "blocked", "reviewing"])
@@ -1299,6 +1299,19 @@ def _plan_inbox(root: Path, beads: Beads) -> None:
         beads.remove_labels(item.id, ["unreviewed"])
         beads.close(item.id, f"Planned as {child_id}")
         console.print(f"[green]Planned[/green] {item.id} -> {child_id}")
+
+
+def _start_ready_worker(root: Path, config: object, beads: Beads, task: BeadSummary) -> RunRecord:
+    source = _review_fix_source_record(root, beads, task)
+    if source is None:
+        return start_worker(root, config, task)
+    return continue_worktree_worker(
+        root,
+        config,
+        task,
+        source,
+        reason=f"repair review issue blocking {_review_fix_parent_id(beads, task) or 'the reviewed task'}",
+    )
 
 
 def _validate_item_interactively(root: Path, beads: Beads, item_id: str) -> None:
@@ -1434,7 +1447,7 @@ def _retry_task(
     task = beads.show(task_id)
     _ensure_retryable(root, task_id)
     _clear_review_cleanup_blockers(beads, task)
-    previous = _current_run_record(root, task_id)
+    previous = _review_fix_source_record(root, beads, task) or _current_run_record(root, task_id)
     session_id = _session_id_for_run(previous) if previous is not None else None
     attempt = _next_attempt(root, task_id)
     _archive_current_run(root, task_id, archive_attempt=attempt)
@@ -1443,7 +1456,11 @@ def _retry_task(
     beads.remove_labels(task_id, _retry_removed_labels(task))
     worktree_exists = previous is not None and Path(previous.worktree).exists()
     reason = _retry_reason(task, previous) if previous is not None else "retry requested"
-    if retry_mode == "session" and worktree_exists and session_id:
+    if _is_review_fix(task) and worktree_exists:
+        record = continue_worktree_worker(root, config, task, previous, reason=reason, attempt=attempt)
+        mode_used = "worktree"
+        note = f"c3x continued source review worktree as attempt {record.attempt} from {previous.task_id}"
+    elif retry_mode == "session" and worktree_exists and session_id:
         record = resume_session_worker(
             root,
             config,
@@ -1484,6 +1501,39 @@ def _clear_review_cleanup_blockers(beads: Beads, task: BeadSummary) -> None:
     beads.add_note(task.id, f"c3x retry cleared {len(cleanup_tasks)} superseded review cleanup task(s)")
 
 
+def _is_review_fix(task: BeadSummary) -> bool:
+    return "review-fix" in task.labels
+
+
+def _review_fix_source_record(root: Path, beads: Beads, task: BeadSummary) -> RunRecord | None:
+    if not _is_review_fix(task):
+        return None
+    parent_id = _review_fix_parent_id(beads, task)
+    if not parent_id:
+        return None
+    record = _current_run_record(root, parent_id)
+    if record is None:
+        return None
+    if not Path(record.worktree).exists():
+        return None
+    return record
+
+
+def _review_fix_parent_id(beads: Beads, task: BeadSummary) -> str | None:
+    parent_id = _blocked_item_id(task)
+    if parent_id:
+        return parent_id
+    try:
+        dependencies = beads.dependencies(task.id, direction="up", dep_type="blocks")
+    except BeadsError:
+        return None
+    for dependency in dependencies:
+        blocked_id = _dependency_blocked_id(dependency, task.id)
+        if blocked_id:
+            return blocked_id
+    return None
+
+
 def _review_cleanup_tasks(beads: Beads, task_id: str) -> list[BeadSummary]:
     cleanup_by_id: dict[str, BeadSummary] = {}
     for item in beads.list_active():
@@ -1510,6 +1560,14 @@ def _dependency_blocker_id(dependency: dict[str, object], blocked_id: str) -> st
     for key in ("id", "issue_id", "from_id", "source_id"):
         value = dependency.get(key)
         if isinstance(value, str) and value and value != blocked_id:
+            return value
+    return None
+
+
+def _dependency_blocked_id(dependency: dict[str, object], blocker_id: str) -> str | None:
+    for key in ("blocked_id", "issue_id", "to_id", "target_id", "dependent_id", "id"):
+        value = dependency.get(key)
+        if isinstance(value, str) and value and value != blocker_id:
             return value
     return None
 
