@@ -25,6 +25,11 @@ def run_dir(root: Path, task_id: str) -> Path:
     return runs_dir(root) / task_id
 
 
+def run_log_dir(root: Path, task_id: str, task_type: str, attempt: int) -> Path:
+    log_name = task_type.replace("_", "-")
+    return run_dir(root, task_id) / f"{log_name}-attempt-{attempt}"
+
+
 def run_record_path(root: Path, task_id: str) -> Path:
     return run_dir(root, task_id) / "run.json"
 

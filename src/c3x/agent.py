@@ -8,7 +8,7 @@ from pathlib import Path
 from c3x.beads import BeadSummary
 from c3x.config import C3xConfig
 from c3x.gitops import create_conflict_resolution_worktree, create_worktree, task_branch
-from c3x.paths import last_message_path, prompt_path, run_record_path, runs_dir, worktrees_dir
+from c3x.paths import run_log_dir, run_record_path, runs_dir, worktrees_dir
 from c3x.prompt_policy import caveman_mode_text
 from c3x.schema import RunRecord
 
@@ -23,15 +23,16 @@ def start_worker(root: Path, config: C3xConfig, task: BeadSummary, *, attempt: i
     worktree = worktrees_dir(root) / branch.replace("/", "-")
     create_worktree(root, branch, worktree)
 
+    task_type = "worker"
     run_path = run_record_path(root, task.id)
-    prompt = prompt_path(root, task.id)
+    log_dir = run_log_dir(root, task.id, task_type, attempt)
+    prompt = log_dir / "prompt.md"
     result = worktree / ".c3x" / "result.json"
-    last_message = last_message_path(root, task.id)
+    last_message = log_dir / "last-message.md"
     prompt.parent.mkdir(parents=True, exist_ok=True)
     result.parent.mkdir(parents=True, exist_ok=True)
     prompt.write_text(_worker_prompt(task, result), encoding="utf-8")
 
-    task_type = "worker"
     provider = _provider_for_task(config, task_type)
     command = _agent_command(config, worktree, prompt, result, last_message, task_type=task_type)
     process = subprocess.Popen(
@@ -73,10 +74,12 @@ def resume_session_worker(
     if not worktree.exists():
         raise AgentError(f"cannot continue {task.id}: previous worktree is missing: {worktree}")
 
+    task_type = "worker"
     run_path = run_record_path(root, task.id)
-    prompt = prompt_path(root, task.id)
+    log_dir = run_log_dir(root, task.id, task_type, attempt)
+    prompt = log_dir / "prompt.md"
     result = worktree / ".c3x" / "result.json"
-    last_message = last_message_path(root, task.id)
+    last_message = log_dir / "last-message.md"
     prompt.parent.mkdir(parents=True, exist_ok=True)
     result.parent.mkdir(parents=True, exist_ok=True)
     prompt.write_text(
@@ -84,7 +87,6 @@ def resume_session_worker(
         encoding="utf-8",
     )
 
-    task_type = "worker"
     provider = _provider_for_task(config, task_type)
     command = _agent_command(
         config,
@@ -133,10 +135,12 @@ def continue_worktree_worker(
     if not worktree.exists():
         raise AgentError(f"cannot continue {task.id}: previous worktree is missing: {worktree}")
 
+    task_type = "worker"
     run_path = run_record_path(root, task.id)
-    prompt = prompt_path(root, task.id)
+    log_dir = run_log_dir(root, task.id, task_type, attempt)
+    prompt = log_dir / "prompt.md"
     result = worktree / ".c3x" / "result.json"
-    last_message = last_message_path(root, task.id)
+    last_message = log_dir / "last-message.md"
     prompt.parent.mkdir(parents=True, exist_ok=True)
     result.parent.mkdir(parents=True, exist_ok=True)
     prompt.write_text(
@@ -144,7 +148,6 @@ def continue_worktree_worker(
         encoding="utf-8",
     )
 
-    task_type = "worker"
     provider = _provider_for_task(config, task_type)
     command = _agent_command(config, worktree, prompt, result, last_message, task_type=task_type)
     process = subprocess.Popen(
@@ -192,10 +195,12 @@ def start_conflict_resolver(
         worktree=worktree,
     )
 
+    task_type = "conflict_resolver"
     run_path = run_record_path(root, task.id)
-    prompt = prompt_path(root, task.id)
+    log_dir = run_log_dir(root, task.id, task_type, attempt)
+    prompt = log_dir / "prompt.md"
     result = worktree / ".c3x" / "result.json"
-    last_message = last_message_path(root, task.id)
+    last_message = log_dir / "last-message.md"
     prompt.parent.mkdir(parents=True, exist_ok=True)
     result.parent.mkdir(parents=True, exist_ok=True)
     prompt.write_text(
@@ -211,7 +216,6 @@ def start_conflict_resolver(
         encoding="utf-8",
     )
 
-    task_type = "conflict_resolver"
     provider = _provider_for_task(config, task_type)
     command = _agent_command(config, worktree, prompt, result, last_message, task_type=task_type)
     process = subprocess.Popen(

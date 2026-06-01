@@ -3,6 +3,7 @@ from pathlib import Path
 from c3x import agent
 from c3x.agent import _agent_command
 from c3x.agent import _next_attempt
+from c3x.agent import start_conflict_resolver
 from c3x.agent import start_worker
 from c3x.agent import _worker_prompt
 from c3x.schema import RunRecord
@@ -164,7 +165,91 @@ def test_start_worker_launches_in_new_process_session(monkeypatch, tmp_path: Pat
     assert record.pid == 12345
     assert record.provider == "codex"
     assert record.task_type == "worker"
+    assert Path(record.prompt) == tmp_path / ".flow" / "runs" / "bd-1" / "worker-attempt-1" / "prompt.md"
+    assert Path(record.last_message) == tmp_path / ".flow" / "runs" / "bd-1" / "worker-attempt-1" / "last-message.md"
     assert popen_kwargs["start_new_session"] is True
+
+
+def test_start_worker_writes_process_logs_under_attempt_folder(monkeypatch, tmp_path: Path) -> None:
+    launched: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 12345
+
+    def fake_popen(command: list[str], **kwargs: object) -> FakeProcess:
+        launched["command"] = command
+        launched["stdout"] = kwargs["stdout"]
+        launched["stderr"] = kwargs["stderr"]
+        return FakeProcess()
+
+    monkeypatch.setattr(agent, "create_worktree", lambda root, branch, worktree: worktree.mkdir(parents=True))
+    monkeypatch.setattr(agent.subprocess, "Popen", fake_popen)
+    config = C3xConfig.model_validate(
+        {
+            "agents": {
+                "codex_command": "fake-codex",
+                "codex_args": ["{prompt}", "{last_message}"],
+            }
+        }
+    )
+
+    record = start_worker(tmp_path, config, BeadSummary(id="bd-1", title="Fix auth"))
+    log_dir = tmp_path / ".flow" / "runs" / "bd-1" / "worker-attempt-1"
+
+    assert launched["command"] == ["fake-codex", str(log_dir / "prompt.md"), str(log_dir / "last-message.md")]
+    assert Path(launched["stdout"].name) == log_dir / "stdout.log"
+    assert Path(launched["stderr"].name) == log_dir / "stderr.log"
+    assert Path(record.prompt).parent == log_dir
+    launched["stdout"].close()
+    launched["stderr"].close()
+
+
+def test_start_conflict_resolver_uses_separate_log_folder(monkeypatch, tmp_path: Path) -> None:
+    launched: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 12345
+
+    def fake_popen(command: list[str], **kwargs: object) -> FakeProcess:
+        launched["command"] = command
+        launched["stdout"] = kwargs["stdout"]
+        launched["stderr"] = kwargs["stderr"]
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        agent,
+        "create_conflict_resolution_worktree",
+        lambda root, branch, source_branch, worktree: worktree.mkdir(parents=True) or ["app.py"],
+    )
+    monkeypatch.setattr(agent.subprocess, "Popen", fake_popen)
+    config = C3xConfig.model_validate(
+        {
+            "agents": {
+                "codex_command": "fake-codex",
+                "codex_args": ["{prompt}", "{last_message}"],
+            }
+        }
+    )
+
+    record = start_conflict_resolver(
+        tmp_path,
+        config,
+        BeadSummary(id="bd-1", title="Fix auth"),
+        source_branch="c3x/bd-1-fix-auth",
+        target_branch="main",
+        target_revision="abc123",
+        original_result="{}",
+        attempt=2,
+    )
+    log_dir = tmp_path / ".flow" / "runs" / "bd-1" / "conflict-resolver-attempt-2"
+
+    assert launched["command"] == ["fake-codex", str(log_dir / "prompt.md"), str(log_dir / "last-message.md")]
+    assert Path(launched["stdout"].name) == log_dir / "stdout.log"
+    assert Path(launched["stderr"].name) == log_dir / "stderr.log"
+    assert Path(record.prompt).parent == log_dir
+    assert record.task_type == "conflict_resolver"
+    launched["stdout"].close()
+    launched["stderr"].close()
 
 
 def test_start_worker_uses_worker_provider_override(monkeypatch, tmp_path: Path) -> None:
