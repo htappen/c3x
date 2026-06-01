@@ -370,6 +370,42 @@ def test_status_renders_workflow_counts(monkeypatch, tmp_path: Path) -> None:
     assert "3" in result.stdout
 
 
+def test_status_avoids_deep_beads_and_unstick_scans(monkeypatch, tmp_path: Path) -> None:
+    class FastStatusBeads(_RecordingBeads):
+        def __init__(self) -> None:
+            super().__init__()
+            self.items["bd-ready"] = BeadSummary(id="bd-ready", title="queued", labels=("flow", "ready"))
+            self.active_calls = 0
+
+        def list_active(self) -> list[BeadSummary]:
+            self.active_calls += 1
+            return super().list_active()
+
+        def ready(self) -> list[BeadSummary]:
+            raise AssertionError("status should not run bd ready")
+
+    runner = CliRunner()
+    beads = FastStatusBeads()
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda root: type("Config", (), {"limits": type("Limits", (), {"max_parallel_workers": 3})()})(),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_unstick_candidates",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("status should not run deep unstick")),
+    )
+
+    result = runner.invoke(cli.app, ["status"])
+
+    assert result.exit_code == 0
+    assert beads.active_calls == 1
+    assert "queued" in result.stdout
+
+
 def test_status_reviewing_count_excludes_reviewed_and_land_blocked(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _RecordingBeads()

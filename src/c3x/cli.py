@@ -100,6 +100,15 @@ class WorkflowRow:
     detail: str
 
 
+@dataclass(frozen=True)
+class StatusSnapshot:
+    config: object
+    active_items: list[BeadSummary]
+    ready_items: list[BeadSummary]
+    canonical_records: list[RunRecord]
+    live_records: list[RunRecord]
+
+
 def _root() -> Path:
     return Path.cwd()
 
@@ -818,12 +827,29 @@ def _status_live(view: Group) -> Live:
 
 
 def _build_status_view(root: Path) -> Group:
+    snapshot = _status_snapshot(root)
     return Group(
         _build_supervisor_table(root),
-        _build_status_table(root),
-        _build_unstick_table(root),
-        _build_codex_status_table(root),
-        _build_workers_table(root),
+        _build_status_table(root, snapshot),
+        _build_unstick_table(snapshot),
+        _build_codex_status_table(snapshot),
+        _build_workers_table(snapshot),
+    )
+
+
+def _status_snapshot(root: Path) -> StatusSnapshot:
+    config = load_config(root)
+    beads = _beads(root)
+    active_items = beads.list_active()
+    ready_items = [item for item in active_items if "ready" in item.labels]
+    canonical_records = _canonical_run_records(root)
+    live_records = _live_worker_records(root, canonical_records=canonical_records)
+    return StatusSnapshot(
+        config=config,
+        active_items=active_items,
+        ready_items=ready_items,
+        canonical_records=canonical_records,
+        live_records=live_records,
     )
 
 
@@ -848,14 +874,14 @@ def _build_activity_table(root: Path) -> Table:
     return _build_supervisor_table(root)
 
 
-def _build_workers_table(root: Path) -> Table:
+def _build_workers_table(snapshot: StatusSnapshot) -> Table:
     table = Table(title="c3x workers")
     table.add_column("Task")
     table.add_column("Status")
     table.add_column("PID", justify="right")
     table.add_column("Age")
     table.add_column("Latest")
-    workers = _live_worker_records(root)
+    workers = snapshot.live_records
     if not workers:
         table.add_row("-", "idle", "", "", "")
         return table
@@ -871,15 +897,15 @@ def _build_workers_table(root: Path) -> Table:
     return table
 
 
-def _build_codex_status_table(root: Path) -> Table:
-    config = load_config(root)
+def _build_codex_status_table(snapshot: StatusSnapshot) -> Table:
+    config = snapshot.config
     provider = getattr(getattr(config, "agents", None), "provider", "codex")
-    active_ids = {item.id for item in _with_labels(_beads(root).list_active(), {"flow"})}
+    active_ids = {item.id for item in _with_labels(snapshot.active_items, {"flow"})}
     table = Table(title=f"{provider} /status")
     table.add_column("Task")
     table.add_column("Latest")
     rows = 0
-    for record in _provider_status_records(root, active_ids=active_ids):
+    for record in _provider_status_records(snapshot, active_ids=active_ids):
         status = _codex_status_for_record(record) or _worker_status_fallback(record)
         if status:
             table.add_row(record.task_id, status)
@@ -889,15 +915,15 @@ def _build_codex_status_table(root: Path) -> Table:
     return table
 
 
-def _provider_status_records(root: Path, *, active_ids: set[str]) -> list[RunRecord]:
+def _provider_status_records(snapshot: StatusSnapshot, *, active_ids: set[str]) -> list[RunRecord]:
     records: list[RunRecord] = []
     seen: set[str] = set()
-    for record in _live_worker_records(root):
+    for record in snapshot.live_records:
         if record.task_id not in active_ids:
             continue
         records.append(record)
         seen.add(record.task_id)
-    for record in _canonical_run_records(root):
+    for record in snapshot.canonical_records:
         if record.task_id not in active_ids:
             continue
         if record.task_id in seen or record.status not in {"running", "blocked", "failed"}:
@@ -966,11 +992,18 @@ def _extract_codex_status(text: str) -> str:
     return _one_line("\n".join(status_lines))
 
 
-def _build_status_table(root: Path) -> Table:
-    config = load_config(root)
-    beads = _beads(root)
-    open_items = beads.list_active()
-    rows = _workflow_rows(root, open_items, beads.ready())
+def _build_status_table(root: Path, snapshot: StatusSnapshot | None = None) -> Table:
+    if snapshot is None:
+        snapshot = _status_snapshot(root)
+    config = snapshot.config
+    rows = _workflow_rows(
+        root,
+        snapshot.active_items,
+        snapshot.ready_items,
+        config=config,
+        live_workers=snapshot.live_records,
+        canonical_records=snapshot.canonical_records,
+    )
 
     table = Table(title="c3x workflow")
     table.add_column("State")
@@ -983,12 +1016,8 @@ def _build_status_table(root: Path) -> Table:
     return table
 
 
-def _build_unstick_table(root: Path) -> Table:
-    candidates: list[UnstickCandidate] = []
-    try:
-        candidates = _unstick_candidates(root, _beads(root), task_id=None, verify_mode="none")
-    except (BeadsError, ValueError):
-        candidates = []
+def _build_unstick_table(snapshot: StatusSnapshot) -> Table:
+    candidates = _status_unstick_candidates(snapshot)
     table = Table(title="c3x unstick --dry-run")
     table.add_column("Task")
     table.add_column("Would")
@@ -1001,16 +1030,83 @@ def _build_unstick_table(root: Path) -> Table:
     return table
 
 
-def _workflow_rows(root: Path, open_items: list[BeadSummary], ready_items: list[BeadSummary]) -> list[WorkflowRow]:
-    config = load_config(root)
-    live_workers = _live_worker_records(root)
+def _status_unstick_candidates(snapshot: StatusSnapshot) -> list[UnstickCandidate]:
+    records = {record.task_id: record for record in snapshot.canonical_records}
+    candidates: list[UnstickCandidate] = []
+    for item in _with_labels(snapshot.active_items, {"flow"}):
+        record = records.get(item.id)
+        if record is None:
+            if "running" in item.labels:
+                candidates.append(
+                    UnstickCandidate(
+                        task_id=item.id,
+                        action="mark-blocked-missing-run-record",
+                        reason="Beads says running but no canonical run.json exists",
+                        record_status="missing",
+                        bead_status=item.status,
+                    )
+                )
+            continue
+        stale_running = "running" in item.labels and (
+            record.status != "running" or record.pid is None or not _process_is_running(record.pid)
+        )
+        stale_terminal = item.status == "in_progress" and record.status in {"completed", "reviewed", "landed"}
+        stale_review = "reviewing" in item.labels and record.status == "landed"
+        if stale_running:
+            candidates.append(
+                UnstickCandidate(
+                    task_id=item.id,
+                    action="mark-blocked-stale-running",
+                    reason="Beads says running but recorded worker is not live",
+                    record_status=record.status,
+                    bead_status=item.status,
+                )
+            )
+        elif stale_review or (stale_terminal and record.status == "landed"):
+            candidates.append(
+                UnstickCandidate(
+                    task_id=item.id,
+                    action="close-landed",
+                    reason="run record is landed but Beads still shows active state",
+                    record_status=record.status,
+                    bead_status=item.status,
+                )
+            )
+        elif stale_terminal:
+            candidates.append(
+                UnstickCandidate(
+                    task_id=item.id,
+                    action="sync-terminal-state",
+                    reason="run record is terminal but Beads still shows active state",
+                    record_status=record.status,
+                    bead_status=item.status,
+                )
+            )
+    return candidates
+
+
+def _workflow_rows(
+    root: Path,
+    open_items: list[BeadSummary],
+    ready_items: list[BeadSummary],
+    *,
+    config: object | None = None,
+    live_workers: list[RunRecord] | None = None,
+    canonical_records: list[RunRecord] | None = None,
+) -> list[WorkflowRow]:
+    if config is None:
+        config = load_config(root)
+    if live_workers is None:
+        live_workers = _live_worker_records(root)
     live_task_ids = {record.task_id for record in live_workers}
-    canonical_records = {record.task_id: record for record in _canonical_run_records(root)}
+    if canonical_records is None:
+        canonical_records = _canonical_run_records(root)
+    records = {record.task_id: record for record in canonical_records}
     ready_ids = {item.id for item in ready_items if "flow" in item.labels}
     flow_items = [item for item in open_items if "flow" in item.labels]
     classified: dict[tuple[str, str], list[BeadSummary]] = {}
     for item in flow_items:
-        key = _workflow_key(item, ready_ids=ready_ids, live_task_ids=live_task_ids, records=canonical_records)
+        key = _workflow_key(item, ready_ids=ready_ids, live_task_ids=live_task_ids, records=records)
         classified.setdefault(key, []).append(item)
 
     worker_slots = max(config.limits.max_parallel_workers - len(live_workers), 0)
@@ -3183,7 +3279,12 @@ def _missing_result_summary(record: RunRecord, *, last_message_path: Path, stder
 def _read_tail(path: Path, *, max_chars: int) -> str:
     if not path.exists():
         return ""
-    text = path.read_text(encoding="utf-8", errors="replace")
+    byte_window = max(max_chars * 4, 4096)
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        handle.seek(max(size - byte_window, 0))
+        text = handle.read().decode("utf-8", errors="replace")
     if len(text) <= max_chars:
         return text.strip()
     return text[-max_chars:].strip()
@@ -3203,10 +3304,12 @@ def _process_is_running(pid: int) -> bool:
     return True
 
 
-def _live_worker_records(root: Path) -> list[RunRecord]:
+def _live_worker_records(root: Path, *, canonical_records: list[RunRecord] | None = None) -> list[RunRecord]:
+    if canonical_records is None:
+        canonical_records = _canonical_run_records(root)
     return [
         record
-        for record in _canonical_run_records(root)
+        for record in canonical_records
         if record.status == "running"
         and record.pid is not None
         and _process_is_running(record.pid)
