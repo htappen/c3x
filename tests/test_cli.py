@@ -786,7 +786,7 @@ def test_import_uses_result_path_reported_in_last_message(monkeypatch, tmp_path:
     beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", labels=("flow", "running"))
     run_dir = tmp_path / ".flow" / "runs" / "bd-1"
     actual_worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-3"
-    actual_result = actual_worktree / ".c3x" / "result.json"
+    actual_result = actual_worktree / ".c3x" / "bd-1-result.json"
     actual_result.parent.mkdir(parents=True)
     actual_result.write_text(
         WorkerResult(
@@ -801,7 +801,7 @@ def test_import_uses_result_path_reported_in_last_message(monkeypatch, tmp_path:
     run_dir.mkdir(parents=True)
     last_message = run_dir / "last-message.md"
     last_message.write_text(
-        f"Result written to [`.c3x/result.json`]({actual_result}).\n",
+        f"Result written to [`.c3x/bd-1-result.json`]({actual_result}).\n",
         encoding="utf-8",
     )
     stale_worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-2"

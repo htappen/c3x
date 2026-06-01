@@ -17,6 +17,14 @@ class AgentError(RuntimeError):
     pass
 
 
+def _worker_result_path(worktree: Path, task_id: str) -> Path:
+    return worktree / ".c3x" / f"{_safe_result_prefix(task_id)}-result.json"
+
+
+def _safe_result_prefix(task_id: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "-", task_id).strip("-") or "task"
+
+
 def start_worker(root: Path, config: C3xConfig, task: BeadSummary, *, attempt: int | None = None) -> RunRecord:
     attempt = attempt or _next_attempt(root, task.id)
     branch = _attempt_branch(task.id, task.title, attempt)
@@ -27,7 +35,7 @@ def start_worker(root: Path, config: C3xConfig, task: BeadSummary, *, attempt: i
     run_path = run_record_path(root, task.id)
     log_dir = run_log_dir(root, task.id, task_type, attempt)
     prompt = log_dir / "prompt.md"
-    result = worktree / ".c3x" / "result.json"
+    result = _worker_result_path(worktree, task.id)
     last_message = log_dir / "last-message.md"
     prompt.parent.mkdir(parents=True, exist_ok=True)
     result.parent.mkdir(parents=True, exist_ok=True)
@@ -78,7 +86,7 @@ def resume_session_worker(
     run_path = run_record_path(root, task.id)
     log_dir = run_log_dir(root, task.id, task_type, attempt)
     prompt = log_dir / "prompt.md"
-    result = worktree / ".c3x" / "result.json"
+    result = _worker_result_path(worktree, task.id)
     last_message = log_dir / "last-message.md"
     prompt.parent.mkdir(parents=True, exist_ok=True)
     result.parent.mkdir(parents=True, exist_ok=True)
@@ -139,7 +147,7 @@ def continue_worktree_worker(
     run_path = run_record_path(root, task.id)
     log_dir = run_log_dir(root, task.id, task_type, attempt)
     prompt = log_dir / "prompt.md"
-    result = worktree / ".c3x" / "result.json"
+    result = _worker_result_path(worktree, task.id)
     last_message = log_dir / "last-message.md"
     prompt.parent.mkdir(parents=True, exist_ok=True)
     result.parent.mkdir(parents=True, exist_ok=True)
@@ -199,7 +207,7 @@ def start_conflict_resolver(
     run_path = run_record_path(root, task.id)
     log_dir = run_log_dir(root, task.id, task_type, attempt)
     prompt = log_dir / "prompt.md"
-    result = worktree / ".c3x" / "result.json"
+    result = _worker_result_path(worktree, task.id)
     last_message = log_dir / "last-message.md"
     prompt.parent.mkdir(parents=True, exist_ok=True)
     result.parent.mkdir(parents=True, exist_ok=True)
@@ -256,7 +264,7 @@ def run_reviewer(
     worktree = Path(record.worktree)
     log_dir = run_log_dir(root, task.id, task_type, attempt)
     prompt = log_dir / "prompt.md"
-    result = worktree / ".c3x" / "reviewer-result.json"
+    result = worktree / ".c3x" / f"{_safe_result_prefix(task.id)}-reviewer-result.json"
     last_message = log_dir / "last-message.md"
     prompt.parent.mkdir(parents=True, exist_ok=True)
     result.parent.mkdir(parents=True, exist_ok=True)

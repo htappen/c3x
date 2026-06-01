@@ -1839,7 +1839,9 @@ def _reported_result_path(last_message_path: Path) -> Path | None:
         return None
     patterns = (
         r"Result written to \[`\.c3x/result\.json`\]\(([^)]+)\)",
+        r"Result written to \[`\.c3x/[^`\]]+-result\.json`\]\(([^)]+)\)",
         r"Wrote \[`\.c3x/result\.json`\]\(([^)]+)\)",
+        r"Wrote \[`\.c3x/[^`\]]+-result\.json`\]\(([^)]+)\)",
         r"session result saved at\s+(\S+)",
     )
     for pattern in patterns:
@@ -1850,7 +1852,7 @@ def _reported_result_path(last_message_path: Path) -> Path | None:
 
 
 def _worktree_from_result_path(path: Path) -> Path | None:
-    if path.name == "result.json" and path.parent.name == ".c3x":
+    if (path.name == "result.json" or path.name.endswith("-result.json")) and path.parent.name == ".c3x":
         return path.parent.parent
     return None
 
@@ -3119,8 +3121,8 @@ def _missing_result_summary(record: RunRecord, *, last_message_path: Path, stder
     if "stream disconnected before completion" in combined or "error sending request" in combined:
         return "Codex stream disconnected before c3x found result.json."
     if (
-        "wrote [`.c3x/result.json`]" in combined
-        or "wrote .c3x/result.json" in combined
+        re.search(r"wrote\s+\[`\.c3x/[^`\]]*-?result\.json`\]", combined, flags=re.IGNORECASE)
+        or re.search(r"wrote\s+\.c3x/[^`\s]*-?result\.json", combined, flags=re.IGNORECASE)
         or "session result saved at" in combined
     ):
         return (

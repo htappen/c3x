@@ -45,7 +45,7 @@ def main() -> int:
     subprocess.run(["git", "commit", "-m", f"Complete {task_id}"], cwd=worktree, check=True)
 
     # 5. Write the result file
-    result = worktree / ".c3x" / "result.json"
+    result = worktree / ".c3x" / f"{task_id}-result.json"
     result.parent.mkdir(parents=True, exist_ok=True)
     result.write_text(
         json.dumps(

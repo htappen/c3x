@@ -212,6 +212,7 @@ def test_start_worker_launches_in_new_process_session(monkeypatch, tmp_path: Pat
     assert record.task_type == "worker"
     assert Path(record.prompt) == tmp_path / ".flow" / "runs" / "bd-1" / "worker-attempt-1" / "prompt.md"
     assert Path(record.last_message) == tmp_path / ".flow" / "runs" / "bd-1" / "worker-attempt-1" / "last-message.md"
+    assert Path(record.result).name == "bd-1-result.json"
     assert popen_kwargs["start_new_session"] is True
 
 
@@ -375,7 +376,7 @@ def test_run_reviewer_writes_result_inside_worktree_c3x(monkeypatch, tmp_path: P
         diff_summary="diff",
     )
 
-    result = worktree / ".c3x" / "reviewer-result.json"
+    result = worktree / ".c3x" / "bd-1-reviewer-result.json"
     assert review.status == "approved"
     assert result.exists()
     assert captured["cwd"] == worktree
