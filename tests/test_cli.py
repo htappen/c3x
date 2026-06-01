@@ -226,6 +226,80 @@ def test_land_warns_when_root_branch_is_head(monkeypatch, tmp_path: Path) -> Non
     assert deleted_branches == ["c3x/bd-1-fix-auth"]
 
 
+def test_review_commits_worktree_before_running_reviewer(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", labels=("flow", "reviewing"))
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    (run_dir / "result.json").parent.mkdir(parents=True)
+    (run_dir / "result.json").write_text(
+        WorkerResult(task_id="bd-1", status="completed", summary="done").model_dump_json(),
+        encoding="utf-8",
+    )
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="completed",
+    ).save(run_dir / "run.json")
+    calls: list[tuple[str, object]] = []
+
+    def fake_run_reviewer(*args: object, **kwargs: object) -> ReviewResult:
+        calls.append(("review", kwargs["diff_summary"]))
+        return ReviewResult(task_id="bd-1", status="approved", summary="ok")
+
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "load_config", lambda root: object())
+    monkeypatch.setattr(cli, "commit_worktree_changes", lambda path, message: calls.append(("commit", path)))
+    monkeypatch.setattr(cli, "branch_diff_summary", lambda root, branch: calls.append(("diff", branch)) or "diff")
+    monkeypatch.setattr(cli, "run_reviewer", fake_run_reviewer)
+
+    result = runner.invoke(cli.app, ["review", "bd-1"])
+
+    assert result.exit_code == 0
+    assert calls[:3] == [("commit", worktree), ("diff", "c3x/bd-1-fix"), ("review", "diff")]
+
+
+def test_auto_review_commits_worktree_before_running_reviewer(monkeypatch, tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", labels=("flow", "reviewing"))
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    run_dir.mkdir(parents=True)
+    (run_dir / "result.json").write_text(
+        WorkerResult(task_id="bd-1", status="completed", summary="done").model_dump_json(),
+        encoding="utf-8",
+    )
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="completed",
+    ).save(run_dir / "run.json")
+    calls: list[tuple[str, object]] = []
+
+    def fake_run_reviewer(*args: object, **kwargs: object) -> ReviewResult:
+        calls.append(("review", kwargs["diff_summary"]))
+        return ReviewResult(task_id="bd-1", status="approved", summary="ok")
+
+    monkeypatch.setattr(cli, "load_config", lambda root: object())
+    monkeypatch.setattr(cli, "commit_worktree_changes", lambda path, message: calls.append(("commit", path)))
+    monkeypatch.setattr(cli, "branch_diff_summary", lambda root, branch: calls.append(("diff", branch)) or "diff")
+    monkeypatch.setattr(cli, "run_reviewer", fake_run_reviewer)
+
+    cli._auto_review(tmp_path, beads)
+
+    assert calls[:3] == [("commit", worktree), ("diff", "c3x/bd-1-fix"), ("review", "diff")]
+
+
 def test_add_no_validate_leaves_feedback_unplanned(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _RecordingBeads()

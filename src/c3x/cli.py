@@ -526,6 +526,7 @@ def review(
         _review_result(result)
         record = _load_repaired_current_run_record(root, task_id)
         item = beads.show(task_id)
+        _commit_worktree_before_review(record)
         review_result = run_reviewer(
             root,
             load_config(root),
@@ -2736,6 +2737,7 @@ def _auto_review(root: Path, beads: Beads) -> None:
             _review_result(result)
             record = _load_repaired_current_run_record(root, item.id)
             full_item = beads.show(item.id)
+            _commit_worktree_before_review(record)
             review_result = run_reviewer(
                 root,
                 config,
@@ -2754,6 +2756,10 @@ def _auto_review(root: Path, beads: Beads) -> None:
             beads.add_labels(item.id, ["flow", "blocked", "review-blocked"])
             beads.remove_labels(item.id, ["reviewing"])
             console.print(f"[yellow]Review blocked[/yellow] {item.id}: {exc}")
+
+
+def _commit_worktree_before_review(record: RunRecord) -> None:
+    commit_worktree_changes(Path(record.worktree), f"Complete c3x task {record.task_id}")
 
 
 def _apply_review_result(
