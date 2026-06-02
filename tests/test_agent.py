@@ -384,6 +384,104 @@ def test_run_reviewer_writes_result_inside_worktree_c3x(monkeypatch, tmp_path: P
     assert not (tmp_path / ".flow" / "runs" / "bd-1" / "reviewer-attempt-1" / "result.json").exists()
 
 
+def test_run_reviewer_recovers_result_from_last_message_when_file_missing(monkeypatch, tmp_path: Path) -> None:
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    worktree.mkdir(parents=True)
+    record = RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(tmp_path / ".flow" / "runs" / "bd-1" / "worker-attempt-1" / "prompt.md"),
+        result=str(worktree / ".c3x" / "result.json"),
+        last_message=str(tmp_path / ".flow" / "runs" / "bd-1" / "worker-attempt-1" / "last-message.md"),
+    )
+    config = C3xConfig.model_validate(
+        {
+            "agents": {
+                "codex_command": "fake-codex",
+                "codex_args": ["{prompt}", "{result}", "{last_message}"],
+            }
+        }
+    )
+
+    def fake_run(command: list[str], **kwargs: object) -> object:
+        last_message = Path(command[-1])
+        last_message.write_text(
+            "Could not write result.json.\n\n"
+            "```json\n"
+            '{"task_id":"bd-1","status":"blocked","summary":"needs fix","requirements":[],"issues":[{"title":"fix","description":"bug","severity":"high"}]}\n'
+            "```\n",
+            encoding="utf-8",
+        )
+
+        class Completed:
+            returncode = 0
+
+        return Completed()
+
+    monkeypatch.setattr(agent.subprocess, "run", fake_run)
+
+    review = run_reviewer(
+        tmp_path,
+        config,
+        BeadSummary(id="bd-1", title="Fix auth"),
+        WorkerResult(task_id="bd-1", status="completed", summary="done"),
+        record=record,
+        diff_summary="diff",
+    )
+
+    result = worktree / ".c3x" / "bd-1-reviewer-result.json"
+    assert review.status == "blocked"
+    assert result.exists()
+
+
+def test_run_reviewer_recovers_result_from_review_result_link(monkeypatch, tmp_path: Path) -> None:
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    worktree.mkdir(parents=True)
+    linked_result = worktree / "review-result.json"
+    linked_result.write_text(
+        '{"task_id":"bd-1","status":"blocked","summary":"needs fix","requirements":[],"issues":[{"title":"fix","description":"bug","severity":"high"}]}',
+        encoding="utf-8",
+    )
+    record = RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(tmp_path / ".flow" / "runs" / "bd-1" / "worker-attempt-1" / "prompt.md"),
+        result=str(worktree / ".c3x" / "result.json"),
+        last_message=str(tmp_path / ".flow" / "runs" / "bd-1" / "worker-attempt-1" / "last-message.md"),
+    )
+    config = C3xConfig.model_validate(
+        {
+            "agents": {
+                "codex_command": "fake-codex",
+                "codex_args": ["{prompt}", "{result}", "{last_message}"],
+            }
+        }
+    )
+
+    def fake_run(command: list[str], **kwargs: object) -> object:
+        Path(command[-1]).write_text(f"Review JSON prepared at [review-result.json]({linked_result}:1).\n", encoding="utf-8")
+
+        class Completed:
+            returncode = 0
+
+        return Completed()
+
+    monkeypatch.setattr(agent.subprocess, "run", fake_run)
+
+    review = run_reviewer(
+        tmp_path,
+        config,
+        BeadSummary(id="bd-1", title="Fix auth"),
+        WorkerResult(task_id="bd-1", status="completed", summary="done"),
+        record=record,
+        diff_summary="diff",
+    )
+
+    assert review.status == "blocked"
+
+
 def test_next_attempt_uses_record_and_worktree_suffixes(tmp_path: Path) -> None:
     run_dir = tmp_path / ".flow" / "runs" / "bd-1"
     RunRecord(

@@ -290,8 +290,36 @@ def run_reviewer(
     if completed.returncode != 0:
         raise AgentError(f"reviewer exited with status {completed.returncode}")
     if not result.exists():
-        raise AgentError(f"reviewer did not write result: {result}")
+        recovered = _review_result_from_last_message(last_message)
+        if recovered is None:
+            raise AgentError(f"reviewer did not write result: {result}")
+        try:
+            result.parent.mkdir(parents=True, exist_ok=True)
+            result.write_text(recovered.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+        return recovered
     return ReviewResult.model_validate_json(result.read_text(encoding="utf-8"))
+
+
+def _review_result_from_last_message(last_message: Path) -> ReviewResult | None:
+    if not last_message.exists():
+        return None
+    text = last_message.read_text(encoding="utf-8", errors="replace")
+    for candidate in reversed(re.findall(r"```(?:json)?\s*\n?(.*?)\n?```", text, flags=re.DOTALL)):
+        try:
+            return ReviewResult.model_validate_json(candidate.strip())
+        except Exception:
+            continue
+    for candidate in reversed(re.findall(r"\[[^\]]*review-result\.json\]\(([^):]+)(?::\d+)?\)", text)):
+        path = Path(candidate)
+        if not path.exists():
+            continue
+        try:
+            return ReviewResult.model_validate_json(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+    return None
 
 
 def _agent_command(

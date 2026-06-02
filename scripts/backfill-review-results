@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import re
+from pathlib import Path
+
+
+TAIL_BYTES = 128 * 1024
+FENCE_RE = re.compile(r"```json\s*\n(.*?)\n```", re.DOTALL | re.IGNORECASE)
+LINK_RE = re.compile(r"\[[^\]]*review-result\.json\]\(([^):]+)(?::\d+)?\)")
+
+
+def tail_text(path: Path) -> str:
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        size = handle.tell()
+        handle.seek(max(size - TAIL_BYTES, 0))
+        return handle.read().decode("utf-8", errors="replace")
+
+
+def review_json_from(path: Path) -> str | None:
+    if not path.exists() or not path.is_file():
+        return None
+    text = tail_text(path)
+    for match in reversed(FENCE_RE.findall(text)):
+        candidate = match.strip()
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and {"task_id", "status", "summary", "requirements", "issues"} <= set(payload):
+            return json.dumps(payload, indent=2) + "\n"
+    for match in reversed(LINK_RE.findall(text)):
+        candidate_path = Path(match)
+        if not candidate_path.exists():
+            continue
+        try:
+            payload = json.loads(candidate_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and {"task_id", "status", "summary", "requirements", "issues"} <= set(payload):
+            return json.dumps(payload, indent=2) + "\n"
+    for candidate in diff_json_candidates(text):
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and {"task_id", "status", "summary", "requirements", "issues"} <= set(payload):
+            return json.dumps(payload, indent=2) + "\n"
+    return None
+
+
+def diff_json_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    block: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            block.append(line[1:])
+            continue
+        if block:
+            candidates.extend(json_objects_from_block(block))
+            block = []
+    if block:
+        candidates.extend(json_objects_from_block(block))
+    return list(reversed(candidates))
+
+
+def json_objects_from_block(lines: list[str]) -> list[str]:
+    text = "\n".join(lines)
+    objects: list[str] = []
+    start = text.find("{")
+    while start != -1:
+        end = text.rfind("}")
+        if end <= start:
+            break
+        objects.append(text[start : end + 1])
+        start = text.find("{", start + 1)
+    return objects
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Backfill reviewer-attempt result.json files from fenced JSON in reviewer logs."
+    )
+    parser.add_argument("root", nargs="?", default=".", help="project root containing .flow/runs")
+    parser.add_argument("--force", action="store_true", help="overwrite existing result.json files")
+    args = parser.parse_args()
+
+    runs = Path(args.root).resolve() / ".flow" / "runs"
+    written = 0
+    missing = 0
+    for attempt_dir in sorted(runs.glob("*/reviewer-attempt-*")):
+        result = attempt_dir / "result.json"
+        if result.exists() and not args.force:
+            continue
+        review_json = None
+        for name in ("last-message.md", "stdout.log", "stderr.log"):
+            review_json = review_json_from(attempt_dir / name)
+            if review_json:
+                break
+        if review_json is None:
+            missing += 1
+            print(f"missing-json {attempt_dir}")
+            continue
+        result.write_text(review_json, encoding="utf-8")
+        written += 1
+        print(f"wrote {result}")
+    print(f"done written={written} missing={missing}")
+    return 0 if missing == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
