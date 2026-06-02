@@ -91,6 +91,8 @@ def create_conflict_resolution_worktree(
 
 
 def commit_worktree_changes(worktree: Path, message: str) -> None:
+    if not worktree.exists():
+        raise GitError(f"worktree is missing: {worktree}")
     paths = _changed_worktree_paths(worktree)
     if not paths:
         return

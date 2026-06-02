@@ -22,3 +22,10 @@ def test_delete_branch_reraises_other_branch_failures(monkeypatch, tmp_path: Pat
 
     with pytest.raises(gitops.GitError, match="not fully merged"):
         gitops.delete_branch(tmp_path, "c3x/bd-1-fix")
+
+
+def test_commit_worktree_changes_reports_missing_worktree(tmp_path: Path) -> None:
+    missing = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+
+    with pytest.raises(gitops.GitError, match="worktree is missing"):
+        gitops.commit_worktree_changes(missing, "Complete c3x task bd-1")

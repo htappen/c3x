@@ -2936,6 +2936,9 @@ def _auto_review(root: Path, beads: Beads) -> None:
     for item in _with_labels(beads.list_active(), {"flow", "reviewing"}):
         if "reviewed" in item.labels:
             continue
+        result: WorkerResult | None = None
+        record: RunRecord | None = None
+        full_item: BeadSummary = item
         try:
             result = _load_worker_result(root, item.id)
             _review_result(result)
@@ -2955,7 +2958,14 @@ def _auto_review(root: Path, beads: Beads) -> None:
                 console.print(f"[green]Reviewed[/green] {item.id}")
             else:
                 console.print(f"[yellow]Review blocked[/yellow] {item.id}: {len(review_result.issues)} issue(s)")
-        except (AgentError, BeadsError, ValueError) as exc:
+        except (AgentError, BeadsError, GitError, ValueError) as exc:
+            if result is not None and record is not None and not isinstance(exc, BeadsError):
+                try:
+                    _block_auto_review_exception(root, beads, full_item, result, record, exc)
+                    console.print(f"[yellow]Review blocked[/yellow] {item.id}: {exc}")
+                    continue
+                except BeadsError:
+                    pass
             beads.add_note(item.id, f"c3x auto-review blocked: {exc}")
             beads.add_labels(item.id, ["flow", "blocked", "review-blocked"])
             beads.remove_labels(item.id, ["reviewing"])
@@ -2963,7 +2973,36 @@ def _auto_review(root: Path, beads: Beads) -> None:
 
 
 def _commit_worktree_before_review(record: RunRecord) -> None:
-    commit_worktree_changes(Path(record.worktree), f"Complete c3x task {record.task_id}")
+    worktree = Path(record.worktree)
+    if not worktree.exists():
+        raise ValueError(f"worker worktree is missing: {worktree}")
+    commit_worktree_changes(worktree, f"Complete c3x task {record.task_id}")
+
+
+def _block_auto_review_exception(
+    root: Path,
+    beads: Beads,
+    item: BeadSummary,
+    worker_result: WorkerResult,
+    record: RunRecord,
+    exc: Exception,
+) -> None:
+    review_result = ReviewResult(
+        task_id=item.id,
+        status="blocked",
+        summary=f"Auto-review could not run: {exc}",
+        issues=[
+            ReviewIssue(
+                title="Resolve auto-review blocker",
+                description=str(exc),
+                severity="high",
+            )
+        ],
+    )
+    _block_review_with_tasks(beads, item, worker_result, review_result)
+    record.status = "blocked"
+    record.outcome = "review-blocked"
+    record.save(run_record_path(root, item.id))
 
 
 def _apply_review_result(

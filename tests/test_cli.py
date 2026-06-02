@@ -232,6 +232,7 @@ def test_review_commits_worktree_before_running_reviewer(monkeypatch, tmp_path: 
     beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", labels=("flow", "reviewing"))
     run_dir = tmp_path / ".flow" / "runs" / "bd-1"
     worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    worktree.mkdir(parents=True)
     (run_dir / "result.json").parent.mkdir(parents=True)
     (run_dir / "result.json").write_text(
         WorkerResult(task_id="bd-1", status="completed", summary="done").model_dump_json(),
@@ -270,6 +271,7 @@ def test_auto_review_commits_worktree_before_running_reviewer(monkeypatch, tmp_p
     beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", labels=("flow", "reviewing"))
     run_dir = tmp_path / ".flow" / "runs" / "bd-1"
     worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    worktree.mkdir(parents=True)
     run_dir.mkdir(parents=True)
     (run_dir / "result.json").write_text(
         WorkerResult(task_id="bd-1", status="completed", summary="done").model_dump_json(),
@@ -298,6 +300,48 @@ def test_auto_review_commits_worktree_before_running_reviewer(monkeypatch, tmp_p
     cli._auto_review(tmp_path, beads)
 
     assert calls[:3] == [("commit", worktree), ("diff", "c3x/bd-1-fix"), ("review", "diff")]
+
+
+def test_auto_review_blocks_when_record_worktree_is_missing(monkeypatch, tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", labels=("flow", "reviewing"))
+    beads.next_id = 2
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    run_dir.mkdir(parents=True)
+    (run_dir / "result.json").write_text(
+        WorkerResult(task_id="bd-1", status="completed", summary="done").model_dump_json(),
+        encoding="utf-8",
+    )
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="completed",
+    ).save(run_dir / "run.json")
+
+    monkeypatch.setattr(cli, "load_config", lambda root: object())
+    monkeypatch.setattr(
+        cli,
+        "run_reviewer",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("reviewer should not run")),
+    )
+
+    cli._auto_review(tmp_path, beads)
+
+    saved = RunRecord.load(run_dir / "run.json")
+    cleanup_ids = [item_id for item_id in beads.items if item_id != "bd-1"]
+    assert saved.status == "blocked"
+    assert saved.outcome == "review-blocked"
+    assert cleanup_ids
+    assert beads.items[cleanup_ids[0]].title == "Fix review issue for bd-1: Resolve auto-review blocker"
+    assert f"worker worktree is missing: {worktree}" in (beads.items[cleanup_ids[0]].description or "")
+    assert beads.blockers == [(cleanup_ids[0], "bd-1")]
+    assert ("bd-1", ["flow", "blocked", "review-blocked", "blocker-review-issues"]) in beads.added_labels
+    assert ("bd-1", ["running", "reviewing", "reviewed"]) in beads.removed_labels
 
 
 def test_add_no_validate_leaves_feedback_unplanned(monkeypatch, tmp_path: Path) -> None:
