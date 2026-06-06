@@ -552,37 +552,40 @@ def review(
 
 @app.command()
 def land(
-    task_id: Annotated[str, typer.Argument(help="Reviewed task id to merge.")],
+    task_id: Annotated[str | None, typer.Argument(help="Reviewed task id to merge.")] = None,
+    land_all: Annotated[
+        bool,
+        typer.Option("--all", help="Merge all reviewed tasks, dependencies then oldest worktree first."),
+    ] = False,
     cleanup_done: Annotated[
         bool,
         typer.Option("--cleanup/--no-cleanup", help="Remove the landed worktree and branch after merge."),
     ] = True,
 ) -> None:
     """Merge a reviewed task branch and close the bead."""
+    if land_all == (task_id is not None):
+        raise typer.Exit(_error("pass a task id or --all"))
     root = _root()
     _warn_if_risky_flow_branch(root)
     if worktree_has_changes(root, ignored_prefixes=(".c3x/", ".flow/")):
         try:
-            commit_worktree_changes(root, f"Save local changes before landing task {task_id}")
+            target = "all reviewed tasks" if land_all else f"task {task_id}"
+            commit_worktree_changes(root, f"Save local changes before landing {target}")
         except GitError as exc:
             raise typer.Exit(_error(f"root worktree has uncommitted changes that could not be saved: {exc}"))
+    if land_all:
+        try:
+            _land_all(root, cleanup_done=cleanup_done)
+        except BeadsError as exc:
+            raise typer.Exit(_error(str(exc))) from exc
+        return
     try:
+        assert task_id is not None
         record = _load_repaired_current_run_record(root, task_id)
         if record.status != "reviewed":
             raise ValueError(f"{task_id} is not reviewed")
         beads = _beads(root)
-        commit_worktree_changes(Path(record.worktree), f"Complete c3x task {task_id}")
-        merge_branch(root, record.branch)
-        beads.close(task_id, "Landed by c3x")
-        beads.add_labels(task_id, ["landed"])
-        commit_ledger_changes(root, f"Close c3x task {task_id}")
-        record.status = "landed"
-        record.outcome = "landed"
-        record.finished_at = _now()
-        record.save(run_record_path(root, task_id))
-        if cleanup_done:
-            remove_worktree(root, Path(record.worktree), force=True)
-            delete_branch(root, record.branch)
+        _land_record(root, beads, record, cleanup_done=cleanup_done, close_note="Landed by c3x")
     except GitMergeConflict as exc:
         beads = _beads(root)
         _mark_land_blocked(beads, task_id, exc)
@@ -592,6 +595,85 @@ def land(
     console.print(f"[green]Landed[/green] {task_id}")
     if cleanup_done:
         console.print(f"[green]Cleaned[/green] {task_id}")
+
+
+def _land_all(root: Path, *, cleanup_done: bool) -> None:
+    beads = _beads(root)
+    records: list[RunRecord] = []
+    blocked = 0
+    for item in _ready_to_land_items(beads.list_active()):
+        try:
+            record = _load_repaired_current_run_record(root, item.id)
+            if record.status == "reviewed":
+                records.append(record)
+        except (GitError, ValueError) as exc:
+            blocked += 1
+            _mark_land_error(beads, item.id, exc)
+            console.print(f"[yellow]Land blocked[/yellow] {item.id}: {exc}")
+    records = _order_land_records(beads, records)
+    landed = 0
+    for record in records:
+        try:
+            _land_record(root, beads, record, cleanup_done=cleanup_done, close_note="Landed by c3x")
+            landed += 1
+            console.print(f"[green]Landed[/green] {record.task_id}")
+            if cleanup_done:
+                console.print(f"[green]Cleaned[/green] {record.task_id}")
+        except GitMergeConflict as exc:
+            blocked += 1
+            _mark_land_blocked(beads, record.task_id, exc)
+            console.print(f"[yellow]Land blocked[/yellow] {record.task_id}: {exc}")
+        except (BeadsError, GitError, ValueError) as exc:
+            blocked += 1
+            _mark_land_error(beads, record.task_id, exc)
+            console.print(f"[yellow]Land blocked[/yellow] {record.task_id}: {exc}")
+    console.print(f"Landed {landed}; blocked {blocked}")
+    if blocked:
+        raise typer.Exit(1)
+
+
+def _order_land_records(beads: Beads, records: list[RunRecord]) -> list[RunRecord]:
+    remaining = {record.task_id: record for record in records}
+    blockers = {
+        task_id: {
+            str(dependency.get("depends_on_id"))
+            for dependency in beads.dependencies(task_id, direction="down", dep_type="blocks")
+            if dependency.get("depends_on_id") in remaining
+        }
+        for task_id in remaining
+    }
+    ordered: list[RunRecord] = []
+    while remaining:
+        ready = [record for task_id, record in remaining.items() if not blockers[task_id].intersection(remaining)]
+        if not ready:
+            ready = list(remaining.values())
+        ready.sort(key=lambda record: (record.started_at, record.task_id))
+        for record in ready:
+            ordered.append(record)
+            remaining.pop(record.task_id)
+    return ordered
+
+
+def _land_record(
+    root: Path,
+    beads: Beads,
+    record: RunRecord,
+    *,
+    cleanup_done: bool,
+    close_note: str,
+) -> None:
+    commit_worktree_changes(Path(record.worktree), f"Complete c3x task {record.task_id}")
+    merge_branch(root, record.branch)
+    beads.close(record.task_id, close_note)
+    beads.add_labels(record.task_id, ["landed"])
+    commit_ledger_changes(root, f"Close c3x task {record.task_id}")
+    record.status = "landed"
+    record.outcome = "landed"
+    record.finished_at = _now()
+    record.save(run_record_path(root, record.task_id))
+    if cleanup_done:
+        remove_worktree(root, Path(record.worktree), force=True)
+        delete_branch(root, record.branch)
 
 
 @app.command()
@@ -3143,6 +3225,11 @@ def _mark_land_blocked(beads: Beads, task_id: str, exc: GitMergeConflict) -> Non
     )
     beads.add_labels(task_id, ["flow", "blocked", "land-blocked", "blocker-merge-conflict"])
     beads.remove_labels(task_id, ["running"])
+
+
+def _mark_land_error(beads: Beads, task_id: str, exc: Exception) -> None:
+    beads.add_note(task_id, f"c3x land blocked: {exc}")
+    beads.add_labels(task_id, ["flow", "blocked", "land-blocked"])
 
 
 def _critic_tick(beads: Beads) -> str:

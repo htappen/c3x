@@ -226,6 +226,91 @@ def test_land_warns_when_root_branch_is_head(monkeypatch, tmp_path: Path) -> Non
     assert deleted_branches == ["c3x/bd-1-fix-auth"]
 
 
+def test_land_requires_task_id_or_all(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+
+    missing = runner.invoke(cli.app, ["land"])
+    duplicate = runner.invoke(cli.app, ["land", "bd-1", "--all"])
+
+    assert missing.exit_code == 1
+    assert duplicate.exit_code == 1
+    assert "pass a task id or --all" in missing.stdout
+    assert "pass a task id or --all" in duplicate.stdout
+
+
+def test_land_all_uses_oldest_first_and_continues_after_conflict(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    calls: list[tuple[str, object]] = []
+    for task_id, started_at in (
+        ("bd-new", "2026-06-03T00:00:00+00:00"),
+        ("bd-old", "2026-06-01T00:00:00+00:00"),
+        ("bd-middle", "2026-06-02T00:00:00+00:00"),
+    ):
+        beads.items[task_id] = BeadSummary(
+            id=task_id,
+            title=task_id,
+            labels=("flow", "reviewing", "reviewed"),
+        )
+        run_dir = tmp_path / ".flow" / "runs" / task_id
+        RunRecord(
+            task_id=task_id,
+            branch=f"c3x/{task_id}",
+            worktree=str(tmp_path / ".flow" / "worktrees" / task_id),
+            prompt=str(run_dir / "prompt.md"),
+            result=str(run_dir / "result.json"),
+            last_message=str(run_dir / "last-message.md"),
+            status="reviewed",
+            started_at=started_at,
+        ).save(run_dir / "run.json")
+
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "current_branch", lambda root: "feature")
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "worktree_has_changes", lambda root, ignored_prefixes=(): False)
+    monkeypatch.setattr(cli, "commit_worktree_changes", lambda path, message: None)
+    monkeypatch.setattr(cli, "commit_ledger_changes", lambda root, message: None)
+    monkeypatch.setattr(beads, "close", lambda task_id, note: calls.append(("close", task_id)))
+
+    def merge(root: Path, branch: str) -> None:
+        calls.append(("merge", branch))
+        if branch == "c3x/bd-old":
+            raise cli.GitMergeConflict(branch, ["shared.py"], "content conflict")
+
+    monkeypatch.setattr(cli, "merge_branch", merge)
+
+    result = runner.invoke(cli.app, ["land", "--all", "--no-cleanup"])
+
+    assert result.exit_code == 1
+    assert [value for name, value in calls if name == "merge"] == [
+        "c3x/bd-old",
+        "c3x/bd-middle",
+        "c3x/bd-new",
+    ]
+    assert ("close", "bd-middle") in calls
+    assert ("close", "bd-new") in calls
+    assert "Landed 2; blocked 1" in result.stdout
+    assert ("bd-old", ["flow", "blocked", "land-blocked", "blocker-merge-conflict"]) in beads.added_labels
+
+
+def test_order_land_records_puts_dependencies_before_older_dependents(tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    beads.blockers.append(("bd-new", "bd-old"))
+    paths = {
+        "worktree": str(tmp_path),
+        "prompt": str(tmp_path / "prompt.md"),
+        "result": str(tmp_path / "result.json"),
+        "last_message": str(tmp_path / "last-message.md"),
+    }
+    old = RunRecord(task_id="bd-old", branch="old", started_at="2026-06-01T00:00:00+00:00", **paths)
+    new = RunRecord(task_id="bd-new", branch="new", started_at="2026-06-02T00:00:00+00:00", **paths)
+
+    ordered = cli._order_land_records(beads, [old, new])
+
+    assert [record.task_id for record in ordered] == ["bd-new", "bd-old"]
+
+
 def test_review_commits_worktree_before_running_reviewer(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _RecordingBeads()

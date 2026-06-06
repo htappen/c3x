@@ -137,6 +137,7 @@ Tasks:
 - Check acceptance criteria against worker result.
 - Rerun verification when required.
 - Implement `c3x land <task-id>`.
+- Implement `c3x land --all` to merge all reviewed tasks dependency-first, then oldest-worktree-first, and continue after individual conflicts.
 - Merge approved branches into the main worktree.
 - Reopen tasks or create follow-ups when review fails.
 - Clean up branches and worktrees after successful landing.
