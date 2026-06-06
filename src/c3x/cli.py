@@ -44,6 +44,7 @@ from c3x.gitops import (
     remove_worktree,
     rev_parse,
     squash_head_to,
+    worktree_branches,
     worktree_has_changes,
 )
 from c3x.metrics import collect_metrics
@@ -2036,7 +2037,12 @@ def _repair_archived_run_record_paths(record_path: Path) -> None:
         repaired.save(record_path)
 
 
-def _repaired_run_record(record_path: Path, record: RunRecord) -> RunRecord:
+def _repaired_run_record(
+    record_path: Path,
+    record: RunRecord,
+    *,
+    branch_by_worktree: dict[Path, str] | None = None,
+) -> RunRecord:
     run_dir = record_path.parent
     updates: dict[str, object] = {}
     for field_name in ("prompt", "last_message"):
@@ -2053,7 +2059,7 @@ def _repaired_run_record(record_path: Path, record: RunRecord) -> RunRecord:
             updates["worktree"] = str(worktree)
 
     repaired_worktree = Path(str(updates.get("worktree", record.worktree)))
-    repaired_branch = _branch_for_worktree(repaired_worktree)
+    repaired_branch = _branch_for_worktree(repaired_worktree, branch_by_worktree=branch_by_worktree)
     if repaired_branch and repaired_branch != record.branch:
         updates["branch"] = repaired_branch
 
@@ -2064,7 +2070,13 @@ def _repaired_run_record(record_path: Path, record: RunRecord) -> RunRecord:
     return record.model_copy(update=updates) if updates else record
 
 
-def _branch_for_worktree(worktree: Path) -> str | None:
+def _branch_for_worktree(
+    worktree: Path,
+    *,
+    branch_by_worktree: dict[Path, str] | None = None,
+) -> str | None:
+    if branch_by_worktree is not None:
+        return branch_by_worktree.get(worktree)
     if not worktree.exists():
         return None
     try:
@@ -2203,6 +2215,10 @@ def _squash_message(root: Path, task_id: str) -> str:
 
 def _cleanup_actions(root: Path, *, task_id: str | None, require_task_cleanup: bool = True) -> list[CleanupAction]:
     records = _run_record_paths(root)
+    try:
+        branch_by_worktree = worktree_branches(root)
+    except GitError:
+        branch_by_worktree = None
     canonical = {
         record.task_id: record
         for path, record in records
@@ -2213,7 +2229,7 @@ def _cleanup_actions(root: Path, *, task_id: str | None, require_task_cleanup: b
         if task_id and record.task_id != task_id:
             continue
         run_dir = path.parent
-        if _run_record_needs_repair(path, record):
+        if _run_record_needs_repair(path, record, branch_by_worktree=branch_by_worktree):
             actions.append(
                 CleanupAction(
                     task_id=record.task_id,
@@ -2278,8 +2294,13 @@ def _cleanup_actions(root: Path, *, task_id: str | None, require_task_cleanup: b
     return actions
 
 
-def _run_record_needs_repair(path: Path, record: RunRecord) -> bool:
-    return _repaired_run_record(path, record) != record
+def _run_record_needs_repair(
+    path: Path,
+    record: RunRecord,
+    *,
+    branch_by_worktree: dict[Path, str] | None = None,
+) -> bool:
+    return _repaired_run_record(path, record, branch_by_worktree=branch_by_worktree) != record
 
 
 def _repair_large_beads_payloads(root: Path, beads: Beads, *, task_id: str | None, dry_run: bool) -> None:

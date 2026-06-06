@@ -1,8 +1,36 @@
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from c3x import gitops
+
+
+def test_worktree_branches_parses_porcelain_output(monkeypatch, tmp_path: Path) -> None:
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+
+    def fake_git(root, args, *, capture=False, allow_exit_codes=None):
+        assert root == tmp_path
+        assert args == ["worktree", "list", "--porcelain"]
+        return subprocess.CompletedProcess(
+            ["git", *args],
+            0,
+            stdout=(
+                f"worktree {tmp_path}\n"
+                "HEAD abc123\n"
+                "branch refs/heads/main\n\n"
+                f"worktree {worktree}\n"
+                "HEAD def456\n"
+                "branch refs/heads/c3x/bd-1-fix\n"
+            ),
+        )
+
+    monkeypatch.setattr(gitops, "_git", fake_git)
+
+    assert gitops.worktree_branches(tmp_path) == {
+        tmp_path: "main",
+        worktree: "c3x/bd-1-fix",
+    }
 
 
 def test_delete_branch_ignores_already_missing_branch(monkeypatch, tmp_path: Path) -> None:

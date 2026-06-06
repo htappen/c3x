@@ -48,6 +48,18 @@ def current_branch(root: Path) -> str:
     return result.stdout.strip()
 
 
+def worktree_branches(root: Path) -> dict[Path, str]:
+    result = _git(root, ["worktree", "list", "--porcelain"], capture=True)
+    branches: dict[Path, str] = {}
+    worktree: Path | None = None
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            worktree = Path(line.removeprefix("worktree "))
+        elif worktree is not None and line.startswith("branch refs/heads/"):
+            branches[worktree] = line.removeprefix("branch refs/heads/")
+    return branches
+
+
 def merge_branch(root: Path, branch: str) -> None:
     commit_ledger_changes(root, "Checkpoint c3x ledger before merge")
     result = _git(

@@ -2640,12 +2640,24 @@ def test_cleanup_repairs_run_attempt_and_branch_from_actual_worktree(monkeypatch
         attempt=2,
     ).save(run_dir / "run.json")
     monkeypatch.setattr(cli, "_root", lambda: tmp_path)
-    monkeypatch.setattr(cli, "current_branch", lambda worktree: "c3x/bd-1-fix-attempt-3")
+    monkeypatch.setattr(
+        cli,
+        "worktree_branches",
+        lambda root: {actual_worktree: "c3x/bd-1-fix-attempt-3"},
+    )
+    branch_lookups: list[Path] = []
+
+    def fake_current_branch(worktree: Path) -> str:
+        branch_lookups.append(worktree)
+        return "c3x/bd-1-fix-attempt-3"
+
+    monkeypatch.setattr(cli, "current_branch", fake_current_branch)
 
     result = runner.invoke(cli.app, ["cleanup", "--dry-run"])
 
     assert result.exit_code == 0
     assert "current run metadata" in result.stdout
+    assert branch_lookups == []
 
     result = runner.invoke(cli.app, ["cleanup"])
 
@@ -2654,6 +2666,7 @@ def test_cleanup_repairs_run_attempt_and_branch_from_actual_worktree(monkeypatch
     assert saved.attempt == 3
     assert saved.branch == "c3x/bd-1-fix-attempt-3"
     assert saved.worktree == str(actual_worktree)
+    assert branch_lookups == [actual_worktree]
 
 
 def test_cleanup_removes_landed_worktree_without_deleting_current_run(monkeypatch, tmp_path: Path) -> None:
