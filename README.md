@@ -221,7 +221,7 @@ c3x agents
 - `retry [TASK_ID]`: archive the current run directory, clear blocked/review labels, and start a fresh attempt using the current agent config.
 - `retry --all`: reconcile stale runs, then retry all currently blocked flow tasks. Mutually exclusive with `TASK_ID`.
 - `unstick`: dry-run stale-state repair with cheap verification. It compares Beads state, `.flow/runs/<task-id>/run.json`, worker `result.json`, branch containment, conflict markers, and cheap recorded verification commands.
-- `unstick --fix`: apply eligible repairs, such as closing a Beads task whose completed branch is already contained in `HEAD`.
+- `unstick --fix`: apply eligible repairs, such as closing a Beads task whose completed branch is already contained in `HEAD` or whose direct review-cleanup blockers are all closed. Multi-level review-cleanup chains cascade in one repair run.
 - `unstick --accept-verification-gaps`: allow repair despite recorded or rerun cheap verification gaps. Use this only after reading the reported evidence.
 - `kill --dry-run`: show live recorded c3x worker PIDs without signaling them.
 - `kill`: send `SIGTERM` to recorded live running workers for this project.

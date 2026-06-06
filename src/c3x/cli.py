@@ -814,12 +814,29 @@ def unstick(
         if dry_run:
             console.print("[yellow]Dry run only.[/yellow] Re-run with --fix to apply eligible repairs.")
             return
-        for candidate in candidates:
-            if candidate.verification_issues and not accept_verification_gaps:
-                console.print(f"[yellow]Skipped[/yellow] {candidate.task_id}: cheap verification has gaps")
-                continue
-            _apply_unstick_candidate(root, beads, candidate)
-            console.print(f"[green]Repaired[/green] {candidate.task_id}: {candidate.action}")
+        seen: set[tuple[str, str]] = set()
+        while candidates:
+            repaired = False
+            for candidate in candidates:
+                key = (candidate.task_id, candidate.action)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if candidate.verification_issues and not accept_verification_gaps:
+                    console.print(f"[yellow]Skipped[/yellow] {candidate.task_id}: cheap verification has gaps")
+                    continue
+                _apply_unstick_candidate(root, beads, candidate)
+                console.print(f"[green]Repaired[/green] {candidate.task_id}: {candidate.action}")
+                repaired = True
+            if not repaired:
+                break
+            if task_id is not None:
+                break
+            candidates = [
+                candidate
+                for candidate in _unstick_candidates(root, beads, task_id=None, verify_mode=verify_mode)
+                if candidate.action == "close-review-resolved"
+            ]
     except (BeadsError, GitError, ValueError) as exc:
         raise typer.Exit(_error(str(exc))) from exc
 
@@ -2503,6 +2520,11 @@ def _unstick_candidates(root: Path, beads: Beads, *, task_id: str | None, verify
     active_items = _with_labels(beads.list_active(), {"flow"})
     items = [beads.show(task_id)] if task_id else active_items
     cleanup_by_blocked = _review_cleanup_index(active_items)
+    closed_cleanup_by_blocked: dict[str, list[BeadSummary]] = {}
+    if any({"review-blocked", "blocker-review-issues"}.intersection(item.labels) for item in items):
+        list_closed = getattr(beads, "list_closed", None)
+        if callable(list_closed):
+            closed_cleanup_by_blocked = _review_cleanup_index(list_closed())
     run_records = _run_record_paths(root)
     records_by_task = {
         record.task_id: record
@@ -2512,6 +2534,26 @@ def _unstick_candidates(root: Path, beads: Beads, *, task_id: str | None, verify
     candidates: list[UnstickCandidate] = []
     conflict_scan: bool | None = None
     for item in items:
+        record = records_by_task.get(item.id)
+        if record is not None and {"review-blocked", "blocker-review-issues"}.intersection(item.labels):
+            direct_cleanup_tasks = [
+                *cleanup_by_blocked.get(item.id, []),
+                *closed_cleanup_by_blocked.get(item.id, []),
+            ]
+            if not direct_cleanup_tasks:
+                direct_cleanup_tasks = _direct_review_cleanup_tasks(beads, item.id)
+            if direct_cleanup_tasks and all(cleanup.status == "closed" for cleanup in direct_cleanup_tasks):
+                candidates.append(
+                    UnstickCandidate(
+                        task_id=item.id,
+                        action="close-review-resolved",
+                        reason="all direct review cleanup blockers are closed",
+                        record_status=record.status,
+                        bead_status=item.status,
+                    )
+                )
+                continue
+
         completed_evidence = _completed_result_evidence(root, item.id, run_records=run_records)
         if completed_evidence is not None and _needs_completed_result_state_repair(item, completed_evidence[0]):
             record, result = completed_evidence
@@ -2839,7 +2881,7 @@ def _apply_unstick_candidate(root: Path, beads: Beads, candidate: UnstickCandida
         return
 
     if candidate.action in {"mark-completed-from-result", "mark-reviewed", "close-contained"}:
-        cleanup_tasks = _review_cleanup_tasks(beads, candidate.task_id)
+        cleanup_tasks = [task for task in _review_cleanup_tasks(beads, candidate.task_id) if task.status != "closed"]
         if cleanup_tasks:
             task_list = ", ".join(task.id for task in cleanup_tasks)
             raise ValueError(f"{candidate.task_id} still has review cleanup blockers: {task_list}")
@@ -2889,6 +2931,16 @@ def _apply_unstick_candidate(root: Path, beads: Beads, candidate: UnstickCandida
         record.outcome = "landed"
         if record.finished_at is None:
             record.finished_at = _now()
+        record.save(run_record_path(root, candidate.task_id))
+        return
+    if candidate.action == "close-review-resolved":
+        beads.add_note(candidate.task_id, "c3x unstick closed task after all direct review cleanup blockers closed")
+        beads.close(candidate.task_id, "Resolved by closed review cleanup blockers")
+        record.status = "landed"
+        record.outcome = "review-resolved"
+        record.finished_at = record.finished_at or _now()
+        record.landing_branch = current_branch(root)
+        record.landed_revision = rev_parse(root, "HEAD")
         record.save(run_record_path(root, candidate.task_id))
         return
     raise ValueError(f"unknown unstick action: {candidate.action}")

@@ -3218,6 +3218,106 @@ def test_unstick_does_not_clear_review_cleanup_blockers(monkeypatch, tmp_path: P
     assert RunRecord.load(run_dir / "run.json").status == "blocked"
 
 
+def test_unstick_closes_review_blocked_task_when_cleanup_tasks_are_closed(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="fix",
+        status="in_progress",
+        labels=("flow", "blocked", "review-blocked", "blocker-review-issues"),
+    )
+    beads.items["bd-2"] = BeadSummary(
+        id="bd-2",
+        title="Fix review issue for bd-1: add test",
+        description="Blocks: bd-1",
+        status="closed",
+        labels=("flow", "landed", "review-fix"),
+    )
+    beads.blockers.append(("bd-2", "bd-1"))
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="blocked",
+        outcome="review-blocked",
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "current_branch", lambda root: "feature")
+    monkeypatch.setattr(cli, "rev_parse", lambda root, revision: "resolved123")
+
+    result = runner.invoke(cli.app, ["unstick", "bd-1", "--fix", "--verify", "none"])
+
+    saved = RunRecord.load(run_dir / "run.json")
+    assert result.exit_code == 0
+    assert "close-review-resolved" in result.stdout
+    assert saved.status == "landed"
+    assert saved.outcome == "review-resolved"
+    assert saved.landing_branch == "feature"
+    assert saved.landed_revision == "resolved123"
+    assert ("bd-1", "Resolved by closed review cleanup blockers") in beads.closed
+
+
+def test_unstick_fix_cascades_closed_review_cleanup_chains(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    class _CascadeBeads(_RecordingBeads):
+        def list_active(self) -> list[BeadSummary]:
+            return [item for item in self.items.values() if item.status != "closed"]
+
+        def close(self, task_id: str, note: str) -> None:
+            self.closed.append((task_id, note))
+            self.items[task_id] = replace(self.items[task_id], status="closed")
+
+    beads = _CascadeBeads()
+    for task_id, blocked_id, status in (
+        ("bd-parent", "", "in_progress"),
+        ("bd-child", "bd-parent", "in_progress"),
+        ("bd-leaf", "bd-child", "closed"),
+    ):
+        beads.items[task_id] = BeadSummary(
+            id=task_id,
+            title=task_id,
+            description=f"Blocks: {blocked_id}" if blocked_id else "",
+            status=status,
+            labels=(
+                ("flow", "landed", "review-fix")
+                if status == "closed"
+                else ("flow", "blocked", "review-blocked", "blocker-review-issues", "review-fix")
+            ),
+        )
+        if blocked_id:
+            beads.blockers.append((task_id, blocked_id))
+        if status != "closed":
+            run_dir = tmp_path / ".flow" / "runs" / task_id
+            RunRecord(
+                task_id=task_id,
+                branch=f"c3x/{task_id}",
+                worktree=str(tmp_path / ".flow" / "worktrees" / task_id),
+                prompt=str(run_dir / "prompt.md"),
+                result=str(run_dir / "result.json"),
+                last_message=str(run_dir / "last-message.md"),
+                status="blocked",
+                outcome="review-blocked",
+            ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "current_branch", lambda root: "feature")
+    monkeypatch.setattr(cli, "rev_parse", lambda root, revision: "resolved123")
+
+    result = runner.invoke(cli.app, ["unstick", "--fix", "--verify", "none"])
+
+    assert result.exit_code == 0
+    assert [task_id for task_id, _ in beads.closed] == ["bd-child", "bd-parent"]
+    assert RunRecord.load(tmp_path / ".flow" / "runs" / "bd-child" / "run.json").outcome == "review-resolved"
+    assert RunRecord.load(tmp_path / ".flow" / "runs" / "bd-parent" / "run.json").outcome == "review-resolved"
+
+
 def test_unstick_fix_skips_recorded_verification_gap_by_default(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _RecordingBeads()
