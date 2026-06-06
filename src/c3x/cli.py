@@ -663,6 +663,12 @@ def _land_record(
     cleanup_done: bool,
     close_note: str,
 ) -> None:
+    landing_branch = current_branch(root)
+    if landing_branch == record.branch or landing_branch.startswith("c3x/"):
+        raise GitError(
+            f"refusing to land {record.task_id} into task branch `{landing_branch}`; "
+            "run c3x land from the project landing branch"
+        )
     commit_worktree_changes(Path(record.worktree), f"Complete c3x task {record.task_id}")
     merge_branch(root, record.branch)
     beads.close(record.task_id, close_note)
@@ -671,6 +677,8 @@ def _land_record(
     record.status = "landed"
     record.outcome = "landed"
     record.finished_at = _now()
+    record.landing_branch = landing_branch
+    record.landed_revision = rev_parse(root, landing_branch)
     record.save(run_record_path(root, record.task_id))
     if cleanup_done:
         remove_worktree(root, Path(record.worktree), force=True)
@@ -3211,19 +3219,9 @@ def _auto_land(root: Path, beads: Beads, *, cleanup_done: bool) -> None:
             record = _load_repaired_current_run_record(root, item.id)
             if record.status != "reviewed":
                 continue
-            commit_worktree_changes(Path(record.worktree), f"Complete c3x task {item.id}")
-            merge_branch(root, record.branch)
-            beads.close(item.id, "Landed by c3x watch")
-            beads.add_labels(item.id, ["landed"])
-            commit_ledger_changes(root, f"Close c3x task {item.id}")
-            record.status = "landed"
-            record.outcome = "landed"
-            record.finished_at = _now()
-            record.save(run_record_path(root, item.id))
+            _land_record(root, beads, record, cleanup_done=cleanup_done, close_note="Landed by c3x watch")
             console.print(f"[green]Landed[/green] {item.id}")
             if cleanup_done:
-                remove_worktree(root, Path(record.worktree), force=True)
-                delete_branch(root, record.branch)
                 console.print(f"[green]Cleaned[/green] {item.id}")
         except GitMergeConflict as exc:
             _mark_land_blocked(beads, item.id, exc)

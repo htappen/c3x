@@ -101,6 +101,8 @@ class RunRecord(BaseModel):
     started_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     finished_at: str | None = None
     outcome: str | None = None
+    landing_branch: str | None = None
+    landed_revision: str | None = None
 
     @classmethod
     def load(cls, path: Path) -> "RunRecord":

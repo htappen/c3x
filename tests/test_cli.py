@@ -199,6 +199,7 @@ def test_land_warns_when_root_branch_is_head(monkeypatch, tmp_path: Path) -> Non
     )
     monkeypatch.setattr(cli, "merge_branch", lambda root, branch: None)
     monkeypatch.setattr(cli, "commit_ledger_changes", lambda root, message: None)
+    monkeypatch.setattr(cli, "rev_parse", lambda root, revision: "landed123")
     monkeypatch.setattr(
         cli,
         "remove_worktree",
@@ -239,6 +240,62 @@ def test_land_requires_task_id_or_all(monkeypatch, tmp_path: Path) -> None:
     assert "pass a task id or --all" in duplicate.stdout
 
 
+def test_land_refuses_to_land_task_into_its_own_branch(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    branch = "c3x/bd-1-fix"
+    RunRecord(
+        task_id="bd-1",
+        branch=branch,
+        worktree=str(tmp_path),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="reviewed",
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_warn_if_risky_flow_branch", lambda root: None)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "current_branch", lambda root: branch)
+    monkeypatch.setattr(cli, "worktree_has_changes", lambda root, ignored_prefixes=(): False)
+
+    result = runner.invoke(cli.app, ["land", "bd-1", "--no-cleanup"])
+
+    assert result.exit_code == 1
+    assert "refusing to land bd-1 into task branch" in result.stdout
+    assert not beads.closed
+
+
+def test_land_records_landing_branch_and_revision(monkeypatch, tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix")
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "bd-1"
+    record = RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="reviewed",
+    )
+    monkeypatch.setattr(cli, "current_branch", lambda root: "feature")
+    monkeypatch.setattr(cli, "commit_worktree_changes", lambda path, message: None)
+    monkeypatch.setattr(cli, "merge_branch", lambda root, branch: None)
+    monkeypatch.setattr(cli, "commit_ledger_changes", lambda root, message: None)
+    monkeypatch.setattr(cli, "rev_parse", lambda root, revision: "landed123")
+    monkeypatch.setattr(beads, "close", lambda task_id, note: beads.closed.append((task_id, note)))
+
+    cli._land_record(tmp_path, beads, record, cleanup_done=False, close_note="landed")
+
+    saved = RunRecord.load(run_dir / "run.json")
+    assert saved.status == "landed"
+    assert saved.landing_branch == "feature"
+    assert saved.landed_revision == "landed123"
+
+
 def test_land_all_uses_oldest_first_and_continues_after_conflict(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _RecordingBeads()
@@ -271,6 +328,7 @@ def test_land_all_uses_oldest_first_and_continues_after_conflict(monkeypatch, tm
     monkeypatch.setattr(cli, "worktree_has_changes", lambda root, ignored_prefixes=(): False)
     monkeypatch.setattr(cli, "commit_worktree_changes", lambda path, message: None)
     monkeypatch.setattr(cli, "commit_ledger_changes", lambda root, message: None)
+    monkeypatch.setattr(cli, "rev_parse", lambda root, revision: f"landed-{revision}")
     monkeypatch.setattr(beads, "close", lambda task_id, note: calls.append(("close", task_id)))
 
     def merge(root: Path, branch: str) -> None:
@@ -1142,10 +1200,15 @@ def test_land_repairs_current_record_from_archived_completed_result(monkeypatch,
     monkeypatch.setattr(cli, "_root", lambda: tmp_path)
     monkeypatch.setattr(cli, "_beads", lambda root: beads)
     monkeypatch.setattr(beads, "close", lambda task_id, note: beads.closed.append((task_id, note)))
-    monkeypatch.setattr(cli, "current_branch", lambda worktree: "c3x/bd-1-fix-attempt-3")
+    monkeypatch.setattr(
+        cli,
+        "current_branch",
+        lambda worktree: "feature" if worktree == tmp_path else "c3x/bd-1-fix-attempt-3",
+    )
     monkeypatch.setattr(cli, "commit_worktree_changes", lambda path, message: calls.append(("commit", path)))
     monkeypatch.setattr(cli, "merge_branch", lambda root, branch: calls.append(("merge", branch)))
     monkeypatch.setattr(cli, "commit_ledger_changes", lambda root, message: None)
+    monkeypatch.setattr(cli, "rev_parse", lambda root, revision: "landed123")
     monkeypatch.setattr(cli, "remove_worktree", lambda root, path, force=False: None)
     monkeypatch.setattr(cli, "delete_branch", lambda root, branch, force=False: None)
 
@@ -3367,6 +3430,8 @@ def test_auto_land_commits_merges_and_force_cleans_worker_worktree(monkeypatch, 
     monkeypatch.setattr(cli, "commit_worktree_changes", lambda path, message: calls.append(("commit_worktree", path)))
     monkeypatch.setattr(cli, "merge_branch", lambda root, branch: calls.append(("merge", branch)))
     monkeypatch.setattr(cli, "commit_ledger_changes", lambda root, message: calls.append(("commit_ledger", message)))
+    monkeypatch.setattr(cli, "current_branch", lambda root: "feature")
+    monkeypatch.setattr(cli, "rev_parse", lambda root, revision: "landed123")
     monkeypatch.setattr(beads, "close", lambda task_id, note: calls.append(("close", task_id)))
     monkeypatch.setattr(
         cli,
@@ -3404,6 +3469,7 @@ def test_auto_land_marks_merge_conflict_blocker(monkeypatch, tmp_path: Path) -> 
         status="reviewed",
     ).save(run_dir / "run.json")
     monkeypatch.setattr(cli, "commit_worktree_changes", lambda path, message: None)
+    monkeypatch.setattr(cli, "current_branch", lambda root: "feature")
 
     def fail_merge(root: Path, branch: str) -> None:
         raise cli.GitMergeConflict(branch, ["app.py"], "CONFLICT (content): app.py")
