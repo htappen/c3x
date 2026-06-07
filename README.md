@@ -115,7 +115,7 @@ Commands:
 | `c3x verify` | Run configured project verification commands. |
 | `c3x review` | Review a completed worker result and mark it ready to land. |
 | `c3x land` | Merge a reviewed task branch and close the bead. |
-| `c3x cleanup` | Remove landed task worktrees and superseded stale attempts. |
+| `c3x cleanup` | Remove safe closed/landed task worktrees and superseded stale attempts. |
 | `c3x unstick` | Detect and repair stale c3x worker/Beads state. |
 | `c3x pause` | Pause supervisor dispatch/import loops. |
 | `c3x resume` | Resume supervisor dispatch/import loops. |
@@ -264,14 +264,14 @@ c3x cleanup --force
 - `review TASK_ID`: validate a completed worker result and mark it reviewed.
 - `land TASK_ID`: merge a reviewed branch into the current root branch, close the Beads task, and remove the landed worktree/branch.
 - `land --cleanup/--no-cleanup`: remove the landed worktree and branch after merge. Default: `--cleanup`.
-- `cleanup`: remove landed task worktrees/branches and archived attempts superseded by later completed, reviewed, or landed attempts.
+- `cleanup`: remove landed task resources, closed-task resources already contained in the current branch, and archived attempts superseded by later completed, reviewed, or landed attempts.
 - `cleanup`: also detects tasks marked landed whose branch is not merged, shows commit/diff/status context, and asks before repairing with a merge.
 - `cleanup [TASK_ID]`: cleanup candidates globally or only for one task.
 - `cleanup --dry-run`: show cleanup candidates without deleting anything.
 - `cleanup --force`: force-remove dirty stale worktrees and unmerged stale branches.
 - Help: `c3x review --help`, `c3x land --help`, `c3x cleanup --help`
 
-Cleanup intentionally does not remove active `completed` or `reviewing` worktrees, because those still hold code that may need review or landing.
+Cleanup intentionally preserves active `completed` or `reviewing` worktrees and closed-task branches not contained in the current branch, because those may still hold unique code.
 
 ## CLI, Beads, And Logs
 

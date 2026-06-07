@@ -747,7 +747,7 @@ def cleanup(
         ),
     ] = False,
 ) -> None:
-    """Remove landed task worktrees and superseded stale attempts."""
+    """Remove safe closed/landed task worktrees and superseded stale attempts."""
     root = _root()
     try:
         beads: Beads | None = None
@@ -765,7 +765,18 @@ def cleanup(
             if repair_beads:
                 raise
             reconciled = 0
-        actions = _cleanup_actions(root, task_id=task_id, require_task_cleanup=not repair_beads and not reconciled)
+        try:
+            closed_task_ids = _cleanup_closed_task_ids(beads, task_id=task_id) if beads else set()
+        except BeadsError:
+            if repair_beads:
+                raise
+            closed_task_ids = set()
+        actions = _cleanup_actions(
+            root,
+            task_id=task_id,
+            closed_task_ids=closed_task_ids,
+            require_task_cleanup=not repair_beads and not reconciled,
+        )
         if not actions:
             if not reconciled:
                 console.print("[green]Nothing to clean.[/green]")
@@ -2281,7 +2292,14 @@ def _squash_message(root: Path, task_id: str) -> str:
     return f"Complete c3x task {task_id}"
 
 
-def _cleanup_actions(root: Path, *, task_id: str | None, require_task_cleanup: bool = True) -> list[CleanupAction]:
+def _cleanup_actions(
+    root: Path,
+    *,
+    task_id: str | None,
+    closed_task_ids: set[str] | None = None,
+    require_task_cleanup: bool = True,
+) -> list[CleanupAction]:
+    closed_task_ids = closed_task_ids or set()
     records = _run_record_paths(root)
     try:
         branch_by_worktree = worktree_branches(root)
@@ -2344,6 +2362,22 @@ def _cleanup_actions(root: Path, *, task_id: str | None, require_task_cleanup: b
                         repair_merge=not merged,
                     )
                 )
+            elif record.task_id in closed_task_ids:
+                worktree_exists = Path(record.worktree).exists()
+                branch_exists = local_branch_exists(root, record.branch)
+                if not worktree_exists and not branch_exists:
+                    continue
+                if branch_exists and not is_ancestor(root, record.branch, "HEAD"):
+                    continue
+                actions.append(
+                    CleanupAction(
+                        task_id=record.task_id,
+                        run_dir=run_dir,
+                        worktree=Path(record.worktree),
+                        branch=record.branch,
+                        reason="closed task worktree" if branch_exists else "closed task worktree with missing branch",
+                    )
+                )
             continue
         current = canonical.get(record.task_id)
         if _is_superseded_attempt(record, current):
@@ -2388,9 +2422,23 @@ def _cleanup_actions(root: Path, *, task_id: str | None, require_task_cleanup: b
             )
     if task_id and not actions and require_task_cleanup:
         current = canonical.get(task_id)
+        if current and task_id in closed_task_ids:
+            if Path(current.worktree).exists() or local_branch_exists(root, current.branch):
+                raise ValueError(f"{task_id} is closed but its branch is not merged into HEAD")
+            return actions
         if current and current.status != "landed":
             raise ValueError(f"{task_id} is not landed and has no superseded attempts")
     return actions
+
+
+def _cleanup_closed_task_ids(beads: Beads, *, task_id: str | None) -> set[str]:
+    if task_id:
+        item = beads.show(task_id)
+        return {item.id} if item.status == "closed" and "flow" in item.labels else set()
+    list_closed = getattr(beads, "list_closed", None)
+    if not callable(list_closed):
+        return set()
+    return {item.id for item in list_closed() if item.status == "closed" and "flow" in item.labels}
 
 
 def _landed_record_has_merge_evidence(root: Path, record: RunRecord) -> bool:

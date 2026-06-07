@@ -2764,6 +2764,72 @@ def test_cleanup_preserves_current_blocked_attempt(monkeypatch, tmp_path: Path) 
     assert cli._cleanup_actions(tmp_path, task_id=None) == []
 
 
+def test_cleanup_removes_closed_task_when_branch_is_contained(monkeypatch, tmp_path: Path) -> None:
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    worktree.mkdir(parents=True)
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="blocked",
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "worktree_branches", lambda root: {worktree: "c3x/bd-1-fix"})
+    monkeypatch.setattr(cli, "local_branch_exists", lambda root, branch: True)
+    monkeypatch.setattr(cli, "is_ancestor", lambda root, ancestor, descendant: True)
+
+    actions = cli._cleanup_actions(tmp_path, task_id=None, closed_task_ids={"bd-1"})
+
+    assert len(actions) == 1
+    assert actions[0].reason == "closed task worktree"
+    assert not actions[0].force_remove
+
+
+def test_cleanup_preserves_closed_task_when_branch_is_unmerged(monkeypatch, tmp_path: Path) -> None:
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    worktree.mkdir(parents=True)
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="blocked",
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "worktree_branches", lambda root: {worktree: "c3x/bd-1-fix"})
+    monkeypatch.setattr(cli, "local_branch_exists", lambda root, branch: True)
+    monkeypatch.setattr(cli, "is_ancestor", lambda root, ancestor, descendant: False)
+
+    assert cli._cleanup_actions(tmp_path, task_id=None, closed_task_ids={"bd-1"}) == []
+
+
+def test_cleanup_removes_closed_task_worktree_when_branch_is_missing(monkeypatch, tmp_path: Path) -> None:
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    worktree.mkdir(parents=True)
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="blocked",
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "worktree_branches", lambda root: {})
+    monkeypatch.setattr(cli, "local_branch_exists", lambda root, branch: False)
+
+    actions = cli._cleanup_actions(tmp_path, task_id=None, closed_task_ids={"bd-1"})
+
+    assert len(actions) == 1
+    assert actions[0].reason == "closed task worktree with missing branch"
+
+
 def test_cleanup_preserves_resources_shared_with_current_attempt(monkeypatch, tmp_path: Path) -> None:
     archived_dir = tmp_path / ".flow" / "runs" / "bd-1-attempt-1"
     worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
