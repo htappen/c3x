@@ -542,6 +542,48 @@ def test_auto_review_commits_worktree_before_running_reviewer(monkeypatch, tmp_p
     assert calls[:3] == [("commit", worktree), ("diff", "c3x/bd-1-fix"), ("review", "diff")]
 
 
+def test_auto_review_defers_when_reviewer_exits_with_error(monkeypatch, tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", labels=("flow", "reviewing"))
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    worktree.mkdir(parents=True)
+    run_dir.mkdir(parents=True)
+    (run_dir / "result.json").write_text(
+        WorkerResult(task_id="bd-1", status="completed", summary="done").model_dump_json(),
+        encoding="utf-8",
+    )
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="completed",
+    ).save(run_dir / "run.json")
+
+    monkeypatch.setattr(cli, "load_config", lambda root: object())
+    monkeypatch.setattr(cli, "commit_worktree_changes", lambda path, message: None)
+    monkeypatch.setattr(cli, "branch_diff_summary", lambda root, branch: "diff")
+    monkeypatch.setattr(
+        cli,
+        "run_reviewer",
+        lambda *args, **kwargs: (_ for _ in ()).throw(cli.AgentError("reviewer exited with exit code 1")),
+    )
+
+    cli._auto_review(tmp_path, beads)
+
+    saved = RunRecord.load(run_dir / "run.json")
+    assert saved.status == "completed"
+    assert set(beads.items) == {"bd-1"}
+    assert beads.blockers == []
+    assert "reviewing" in beads.items["bd-1"].labels
+    assert "reviewed" not in beads.items["bd-1"].labels
+    assert "blocked" not in beads.items["bd-1"].labels
+    assert beads.notes == [("bd-1", "c3x auto-review deferred: reviewer exited with exit code 1")]
+
+
 def test_auto_review_blocks_when_record_worktree_is_missing(monkeypatch, tmp_path: Path) -> None:
     beads = _RecordingBeads()
     beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", labels=("flow", "reviewing"))

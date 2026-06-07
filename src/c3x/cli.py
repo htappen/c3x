@@ -3262,7 +3262,10 @@ def _auto_review(root: Path, beads: Beads) -> None:
                 console.print(f"[green]Reviewed[/green] {item.id}")
             else:
                 console.print(f"[yellow]Review blocked[/yellow] {item.id}: {len(review_result.issues)} issue(s)")
-        except (AgentError, BeadsError, GitError, ValueError) as exc:
+        except AgentError as exc:
+            beads.add_note(item.id, f"c3x auto-review deferred: {exc}")
+            console.print(f"[yellow]Review deferred[/yellow] {item.id}: {exc}")
+        except (BeadsError, GitError, ValueError) as exc:
             if result is not None and record is not None and not isinstance(exc, BeadsError):
                 try:
                     _block_auto_review_exception(root, beads, full_item, result, record, exc)
