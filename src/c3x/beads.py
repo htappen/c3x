@@ -65,11 +65,11 @@ class Beads:
         return self._run_json(args)
 
     def list_open(self) -> list[BeadSummary]:
-        payload = self._run_json(["list", "--status", "open", "--json"])
+        payload = self._run_json(["list", "--status", "open", "--limit", "0", "--json"])
         return _summaries(payload)
 
     def list_active(self) -> list[BeadSummary]:
-        payload = self._run_json(["list", "--status", "open,in_progress,blocked", "--json"])
+        payload = self._run_json(["list", "--status", "open,in_progress,blocked", "--limit", "0", "--json"])
         return _summaries(payload)
 
     def list_closed(self) -> list[BeadSummary]:

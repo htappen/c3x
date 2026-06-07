@@ -1124,6 +1124,17 @@ def test_supervisor_tick_records_critic_outcome(monkeypatch, tmp_path: Path) -> 
     assert any(event["event"] == "checking critic tasks" and event["detail"] == "critic tasks OK" for event in events)
 
 
+def test_critic_tick_reports_blocked_tasks_without_creating_task() -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(id="bd-1", title="one", labels=("flow", "blocked"))
+    beads.items["bd-2"] = BeadSummary(id="bd-2", title="two", labels=("flow", "blocked"))
+
+    result = cli._critic_tick(beads)
+
+    assert result == "2 blocked tasks; run c3x critic to create an investigation task"
+    assert set(beads.items) == {"bd-1", "bd-2"}
+
+
 def test_answer_marks_blocking_item_clarified(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _RecordingBeads()

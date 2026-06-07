@@ -3408,18 +3408,7 @@ def _critic_tick(beads: Beads) -> str:
     ]
     if existing:
         return "critic task already exists"
-    created = beads.create_task(
-        "Blocked tasks need investigation",
-        description=(
-            f"c3x critic found {len(blocked)} blocked tasks.\n\n"
-            "Look for missing fixtures, setup documentation, verification commands, "
-            "or overly broad scopes."
-        ),
-        labels=["flow", "critic", "ready"],
-        issue_type="task",
-        priority=1,
-    )
-    return f"created critic task {created.get('id', '<unknown>')}"
+    return f"{len(blocked)} blocked tasks; run c3x critic to create an investigation task"
 
 
 def _recover_interrupted_workers(root: Path, beads: Beads) -> None:

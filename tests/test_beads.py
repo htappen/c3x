@@ -62,6 +62,40 @@ def test_list_closed_requests_all_closed_issues() -> None:
     assert closed[0].status == "closed"
 
 
+def test_list_open_requests_all_open_issues() -> None:
+    class RecordingBeads(Beads):
+        def __init__(self) -> None:
+            super().__init__(Path("/tmp"), executable="bd")
+            self.args: list[str] = []
+
+        def _run_json(self, args: list[str]):  # type: ignore[no-untyped-def]
+            self.args = args
+            return []
+
+    beads = RecordingBeads()
+
+    beads.list_open()
+
+    assert beads.args == ["list", "--status", "open", "--limit", "0", "--json"]
+
+
+def test_list_active_requests_all_active_issues() -> None:
+    class RecordingBeads(Beads):
+        def __init__(self) -> None:
+            super().__init__(Path("/tmp"), executable="bd")
+            self.args: list[str] = []
+
+        def _run_json(self, args: list[str]):  # type: ignore[no-untyped-def]
+            self.args = args
+            return []
+
+    beads = RecordingBeads()
+
+    beads.list_active()
+
+    assert beads.args == ["list", "--status", "open,in_progress,blocked", "--limit", "0", "--json"]
+
+
 def test_compact_issue_falls_back_to_import_when_admin_compact_is_unsupported() -> None:
     class EmbeddedBeads(Beads):
         def __init__(self) -> None:
