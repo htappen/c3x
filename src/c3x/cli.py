@@ -49,7 +49,14 @@ from c3x.gitops import (
     worktree_has_changes,
 )
 from c3x.metrics import collect_metrics
-from c3x.paths import activity_path, pause_path, result_path, run_record_path, stuck_notice_path
+from c3x.paths import (
+    activity_path,
+    pause_path,
+    result_path,
+    run_record_path,
+    stuck_notice_path,
+    worktrees_dir,
+)
 from c3x.schema import ReviewIssue, ReviewResult, RunRecord, WorkerResult
 from c3x.verify import run_verification
 
@@ -71,6 +78,9 @@ class CleanupAction:
     branch: str
     reason: str
     remove_run_dir: bool = False
+    preserve_worktree: bool = False
+    preserve_branch: bool = False
+    force_remove: bool = False
     repair_merge: bool = False
     repair_run_record: bool = False
 
@@ -2342,6 +2352,35 @@ def _cleanup_actions(root: Path, *, task_id: str | None, require_task_cleanup: b
                     branch=record.branch,
                     reason=f"superseded attempt {record.attempt}",
                     remove_run_dir=True,
+                    preserve_worktree=current is not None and current.worktree == record.worktree,
+                    preserve_branch=current is not None and current.branch == record.branch,
+                )
+            )
+    if not task_id and branch_by_worktree is not None:
+        referenced_worktrees = {
+            worktree
+            for path, record in records
+            for worktree in (
+                Path(record.worktree),
+                Path(_repaired_run_record(path, record, branch_by_worktree=branch_by_worktree).worktree),
+            )
+        }
+        managed_dir = worktrees_dir(root)
+        for worktree, branch in branch_by_worktree.items():
+            if worktree in referenced_worktrees or not branch.startswith("c3x/"):
+                continue
+            try:
+                worktree.relative_to(managed_dir)
+            except ValueError:
+                continue
+            actions.append(
+                CleanupAction(
+                    task_id=branch,
+                    run_dir=run_record_path(root, branch.removeprefix("c3x/")).parent,
+                    worktree=worktree,
+                    branch=branch,
+                    reason="orphaned c3x worktree",
+                    force_remove=True,
                 )
             )
     if task_id and not actions and require_task_cleanup:
@@ -2552,9 +2591,7 @@ def _label_state_groups(labels: set[str]) -> list[str]:
 def _is_superseded_attempt(record: RunRecord, current: RunRecord | None) -> bool:
     if current is None:
         return False
-    if current.attempt <= record.attempt:
-        return False
-    return current.status in {"completed", "reviewed", "landed"}
+    return current.attempt > record.attempt
 
 
 def _is_missing_ref_error(exc: GitError) -> bool:
@@ -3132,9 +3169,11 @@ def _run_cleanup_action(root: Path, action: CleanupAction, *, force: bool) -> No
     if action.repair_merge:
         commit_worktree_changes(action.worktree, f"Complete c3x task {action.task_id}")
         merge_branch(root, action.branch)
-    cleanup_force = force or action.reason.startswith("landed") or action.remove_run_dir
-    remove_worktree(root, action.worktree, force=cleanup_force)
-    delete_branch(root, action.branch, force=cleanup_force)
+    cleanup_force = force or action.force_remove or action.reason.startswith("landed") or action.remove_run_dir
+    if not action.preserve_worktree:
+        remove_worktree(root, action.worktree, force=cleanup_force)
+    if not action.preserve_branch:
+        delete_branch(root, action.branch, force=cleanup_force)
     if action.remove_run_dir and action.run_dir.exists():
         shutil.rmtree(action.run_dir)
 

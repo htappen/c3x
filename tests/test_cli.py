@@ -2701,6 +2701,107 @@ def test_cleanup_dry_run_leaves_superseded_attempt(monkeypatch, tmp_path: Path) 
     assert "Would clean" in result.stdout
 
 
+def test_cleanup_removes_superseded_attempt_while_current_attempt_is_blocked(monkeypatch, tmp_path: Path) -> None:
+    archived_dir = tmp_path / ".flow" / "runs" / "bd-1-attempt-1"
+    archived_worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(archived_worktree),
+        prompt=str(archived_dir / "prompt.md"),
+        result=str(archived_dir / "result.json"),
+        last_message=str(archived_dir / "last-message.md"),
+        status="blocked",
+        attempt=1,
+    ).save(archived_dir / "run.json")
+    current_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix-attempt-2",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-2"),
+        prompt=str(current_dir / "prompt.md"),
+        result=str(current_dir / "result.json"),
+        last_message=str(current_dir / "last-message.md"),
+        status="blocked",
+        attempt=2,
+    ).save(current_dir / "run.json")
+    monkeypatch.setattr(cli, "worktree_branches", lambda root: {})
+
+    actions = cli._cleanup_actions(tmp_path, task_id=None)
+
+    assert len(actions) == 1
+    assert actions[0].worktree == archived_worktree
+    assert actions[0].reason == "superseded attempt 1"
+    assert actions[0].remove_run_dir
+
+
+def test_cleanup_preserves_current_blocked_attempt(monkeypatch, tmp_path: Path) -> None:
+    current_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix-attempt-2",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix-attempt-2"),
+        prompt=str(current_dir / "prompt.md"),
+        result=str(current_dir / "result.json"),
+        last_message=str(current_dir / "last-message.md"),
+        status="blocked",
+        attempt=2,
+    ).save(current_dir / "run.json")
+    monkeypatch.setattr(cli, "worktree_branches", lambda root: {})
+
+    assert cli._cleanup_actions(tmp_path, task_id=None) == []
+
+
+def test_cleanup_preserves_resources_shared_with_current_attempt(monkeypatch, tmp_path: Path) -> None:
+    archived_dir = tmp_path / ".flow" / "runs" / "bd-1-attempt-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    for run_dir, attempt in ((archived_dir, 1), (tmp_path / ".flow" / "runs" / "bd-1", 2)):
+        RunRecord(
+            task_id="bd-1",
+            branch="c3x/bd-1-fix",
+            worktree=str(worktree),
+            prompt=str(run_dir / "prompt.md"),
+            result=str(run_dir / "result.json"),
+            last_message=str(run_dir / "last-message.md"),
+            status="blocked",
+            attempt=attempt,
+        ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "worktree_branches", lambda root: {})
+
+    actions = cli._cleanup_actions(tmp_path, task_id=None)
+
+    assert len(actions) == 1
+    assert actions[0].preserve_worktree
+    assert actions[0].preserve_branch
+
+
+def test_cleanup_removes_unreferenced_managed_c3x_worktree(monkeypatch, tmp_path: Path) -> None:
+    orphan = tmp_path / ".flow" / "worktrees" / "c3x-bd-orphan"
+    monkeypatch.setattr(cli, "worktree_branches", lambda root: {orphan: "c3x/bd-orphan"})
+
+    actions = cli._cleanup_actions(tmp_path, task_id=None)
+
+    assert len(actions) == 1
+    assert actions[0].worktree == orphan
+    assert actions[0].branch == "c3x/bd-orphan"
+    assert actions[0].reason == "orphaned c3x worktree"
+    assert actions[0].force_remove
+
+
+def test_cleanup_preserves_unreferenced_worktree_outside_managed_directory(monkeypatch, tmp_path: Path) -> None:
+    external = tmp_path / "manual-worktree"
+    monkeypatch.setattr(cli, "worktree_branches", lambda root: {external: "c3x/manual"})
+
+    assert cli._cleanup_actions(tmp_path, task_id=None) == []
+
+
+def test_cleanup_preserves_unreferenced_non_c3x_managed_worktree(monkeypatch, tmp_path: Path) -> None:
+    managed = tmp_path / ".flow" / "worktrees" / "manual"
+    monkeypatch.setattr(cli, "worktree_branches", lambda root: {managed: "feature"})
+
+    assert cli._cleanup_actions(tmp_path, task_id=None) == []
+
+
 def test_cleanup_dry_run_reports_archived_run_metadata_repair(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     canonical_dir = tmp_path / ".flow" / "runs" / "bd-1"
