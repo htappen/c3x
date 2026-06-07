@@ -2745,6 +2745,18 @@ def _unstick_candidates(root: Path, beads: Beads, *, task_id: str | None, verify
             )
         verification_issues = (*verification_issues, *review_cleanup_issues)
 
+        if stale_running and record.status in {"running", "blocked"}:
+            candidates.append(
+                UnstickCandidate(
+                    task_id=item.id,
+                    action="mark-blocked-stale-running",
+                    reason="Beads says running but recorded worker is not live",
+                    record_status=record.status,
+                    bead_status=item.status,
+                )
+            )
+            continue
+
         if record.status == "landed":
             candidates.append(
                 UnstickCandidate(
@@ -3033,6 +3045,16 @@ def _apply_unstick_candidate(root: Path, beads: Beads, candidate: UnstickCandida
         except GitError as exc:
             raise ValueError(f"worker worktree has uncommitted changes that could not be saved: {exc}")
     item = beads.show(candidate.task_id)
+    if candidate.action == "mark-blocked-stale-running":
+        beads.add_note(candidate.task_id, "c3x unstick removed stale running worker state")
+        beads.add_labels(candidate.task_id, ["flow", "blocked", "blocker-worker-not-live"])
+        beads.remove_labels(candidate.task_id, ["running", "reviewing"])
+        record.status = "blocked"
+        record.outcome = record.outcome or "worker-not-live"
+        record.pid = None
+        record.finished_at = record.finished_at or _now()
+        record.save(run_record_path(root, candidate.task_id))
+        return
     if candidate.action == "mark-completed-from-result":
         evidence = _completed_result_evidence(root, candidate.task_id)
         if evidence is None:
