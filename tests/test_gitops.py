@@ -57,3 +57,19 @@ def test_commit_worktree_changes_reports_missing_worktree(tmp_path: Path) -> Non
 
     with pytest.raises(gitops.GitError, match="worktree is missing"):
         gitops.commit_worktree_changes(missing, "Complete c3x task bd-1")
+
+
+def test_history_has_subject_requires_exact_subject(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        gitops,
+        "_git",
+        lambda root, args, capture=False, allow_exit_codes=None: subprocess.CompletedProcess(
+            args,
+            0,
+            stdout="Complete c3x task bd-10\nComplete c3x task bd-1\n",
+            stderr="",
+        ),
+    )
+
+    assert gitops.history_has_subject(tmp_path, "HEAD", "Complete c3x task bd-1")
+    assert not gitops.history_has_subject(tmp_path, "HEAD", "Complete c3x task bd")

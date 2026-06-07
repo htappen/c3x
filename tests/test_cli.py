@@ -3560,6 +3560,7 @@ def test_cleanup_repairs_landed_unmerged_branch_after_confirmation(monkeypatch, 
     ).save(run_dir / "run.json")
     monkeypatch.setattr(cli, "_root", lambda: tmp_path)
     monkeypatch.setattr(cli, "is_ancestor", lambda root, ancestor, descendant: False)
+    monkeypatch.setattr(cli, "history_has_subject", lambda root, revision, subject: False)
     monkeypatch.setattr(cli, "branch_diff_summary", lambda root, branch: "Diff stat:\n file.ts | 2 +")
     monkeypatch.setattr(cli, "commit_worktree_changes", lambda path, message: calls.append(("commit_worktree", path)))
     monkeypatch.setattr(cli, "merge_branch", lambda root, branch: calls.append(("merge", branch)))
@@ -3595,6 +3596,7 @@ def test_cleanup_skips_landed_unmerged_branch_when_declined(monkeypatch, tmp_pat
     ).save(run_dir / "run.json")
     monkeypatch.setattr(cli, "_root", lambda: tmp_path)
     monkeypatch.setattr(cli, "is_ancestor", lambda root, ancestor, descendant: False)
+    monkeypatch.setattr(cli, "history_has_subject", lambda root, revision, subject: False)
     monkeypatch.setattr(cli, "branch_diff_summary", lambda root, branch: "Diff stat:\n file.ts | 2 +")
     monkeypatch.setattr(cli, "merge_branch", lambda root, branch: calls.append(("merge", branch)))
 
@@ -3603,6 +3605,86 @@ def test_cleanup_skips_landed_unmerged_branch_when_declined(monkeypatch, tmp_pat
     assert result.exit_code == 0
     assert "Skipped" in result.stdout
     assert calls == []
+
+
+def test_cleanup_does_not_merge_review_resolved_branch(monkeypatch, tmp_path: Path) -> None:
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="landed",
+        outcome="review-resolved",
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "worktree_branches", lambda root: {})
+    monkeypatch.setattr(cli, "is_ancestor", lambda root, ancestor, descendant: False)
+
+    actions = cli._cleanup_actions(tmp_path, task_id="bd-1")
+
+    assert len(actions) == 1
+    assert actions[0].reason == "landed worktree"
+    assert not actions[0].repair_merge
+
+
+def test_cleanup_uses_historical_task_commit_when_branch_tip_advanced(monkeypatch, tmp_path: Path) -> None:
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="landed",
+        outcome="landed",
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "worktree_branches", lambda root: {})
+    monkeypatch.setattr(cli, "is_ancestor", lambda root, ancestor, descendant: False)
+    monkeypatch.setattr(
+        cli,
+        "history_has_subject",
+        lambda root, revision, subject: subject == "Complete c3x task bd-1",
+    )
+
+    actions = cli._cleanup_actions(tmp_path, task_id="bd-1")
+
+    assert len(actions) == 1
+    assert actions[0].reason == "landed worktree"
+    assert not actions[0].repair_merge
+
+
+def test_cleanup_uses_recorded_landing_revision_when_source_branch_tip_advanced(monkeypatch, tmp_path: Path) -> None:
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-fix",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="landed",
+        outcome="landed",
+        landing_branch="feature",
+        landed_revision="landed123",
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "worktree_branches", lambda root: {})
+    monkeypatch.setattr(
+        cli,
+        "is_ancestor",
+        lambda root, ancestor, descendant: ancestor == "landed123" and descendant == "feature",
+    )
+
+    actions = cli._cleanup_actions(tmp_path, task_id="bd-1")
+
+    assert len(actions) == 1
+    assert actions[0].reason == "landed worktree"
+    assert not actions[0].repair_merge
 
 
 def test_auto_land_commits_merges_and_force_cleans_worker_worktree(monkeypatch, tmp_path: Path) -> None:

@@ -161,6 +161,11 @@ def commit_subject(root: Path, rev: str) -> str:
     return result.stdout.strip()
 
 
+def history_has_subject(root: Path, rev: str, subject: str) -> bool:
+    result = _git(root, ["log", rev, "--format=%s", "--fixed-strings", f"--grep={subject}"], capture=True)
+    return subject in result.stdout.splitlines()
+
+
 def commit_parents(root: Path, rev: str) -> list[str]:
     result = _git(root, ["rev-list", "--parents", "-n", "1", rev], capture=True)
     parts = result.stdout.strip().split()

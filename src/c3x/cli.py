@@ -39,6 +39,7 @@ from c3x.gitops import (
     current_branch,
     delete_branch,
     ensure_rewrite_safe,
+    history_has_subject,
     is_ancestor,
     merge_branch,
     remove_worktree,
@@ -2304,7 +2305,7 @@ def _cleanup_actions(root: Path, *, task_id: str | None, require_task_cleanup: b
         if path == run_record_path(root, record.task_id):
             if record.status == "landed":
                 try:
-                    merged = is_ancestor(root, record.branch, "HEAD")
+                    merged = _landed_record_has_merge_evidence(root, record)
                 except GitError as exc:
                     if not _is_missing_ref_error(exc):
                         raise
@@ -2348,6 +2349,25 @@ def _cleanup_actions(root: Path, *, task_id: str | None, require_task_cleanup: b
         if current and current.status != "landed":
             raise ValueError(f"{task_id} is not landed and has no superseded attempts")
     return actions
+
+
+def _landed_record_has_merge_evidence(root: Path, record: RunRecord) -> bool:
+    if record.outcome == "review-resolved":
+        return True
+    if record.landed_revision and record.landing_branch:
+        try:
+            if is_ancestor(root, record.landed_revision, record.landing_branch):
+                return True
+        except GitError as exc:
+            if not _is_missing_ref_error(exc):
+                raise
+    if is_ancestor(root, record.branch, "HEAD"):
+        return True
+    return history_has_subject(root, "HEAD", f"Complete c3x task {record.task_id}") or history_has_subject(
+        root,
+        "HEAD",
+        f"Merge {record.branch}",
+    )
 
 
 def _run_record_needs_repair(
