@@ -2647,6 +2647,7 @@ def test_cleanup_removes_superseded_attempt_run_directory(monkeypatch, tmp_path:
         attempt=2,
     ).save(current_dir / "run.json")
     monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "local_branch_exists", lambda root, branch: True)
     monkeypatch.setattr(cli, "is_ancestor", lambda root, ancestor, descendant: True)
     monkeypatch.setattr(
         cli,
@@ -2947,6 +2948,7 @@ def test_cleanup_removes_landed_worktree_without_deleting_current_run(monkeypatc
         attempt=1,
     ).save(run_dir / "run.json")
     monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "local_branch_exists", lambda root, branch: True)
     monkeypatch.setattr(cli, "is_ancestor", lambda root, ancestor, descendant: True)
     monkeypatch.setattr(cli, "remove_worktree", lambda root, path, force=False: removed_worktrees.append(path))
     monkeypatch.setattr(cli, "delete_branch", lambda root, branch, force=False: deleted_branches.append(branch))
@@ -2977,6 +2979,7 @@ def test_cleanup_removes_landed_worktree_when_branch_is_already_missing(monkeypa
         attempt=1,
     ).save(run_dir / "run.json")
     monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "local_branch_exists", lambda root, branch: False)
     monkeypatch.setattr(
         cli,
         "is_ancestor",
@@ -3009,6 +3012,7 @@ def test_cleanup_ignores_landed_record_when_branch_and_worktree_are_missing(monk
         attempt=1,
     ).save(run_dir / "run.json")
     monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "local_branch_exists", lambda root, branch: False)
     monkeypatch.setattr(
         cli,
         "is_ancestor",
@@ -3181,6 +3185,7 @@ def test_cleanup_reconciles_landed_labels(monkeypatch, tmp_path: Path) -> None:
     ).save(run_dir / "run.json")
     monkeypatch.setattr(cli, "_root", lambda: tmp_path)
     monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "local_branch_exists", lambda root, branch: True)
     monkeypatch.setattr(cli, "is_ancestor", lambda root, ancestor, descendant: True)
     monkeypatch.setattr(cli, "remove_worktree", lambda root, path, force=False: None)
     monkeypatch.setattr(cli, "delete_branch", lambda root, branch, force=False: None)
@@ -3660,6 +3665,7 @@ def test_cleanup_repairs_landed_unmerged_branch_after_confirmation(monkeypatch, 
         attempt=1,
     ).save(run_dir / "run.json")
     monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "local_branch_exists", lambda root, branch: True)
     monkeypatch.setattr(cli, "is_ancestor", lambda root, ancestor, descendant: False)
     monkeypatch.setattr(cli, "history_has_subject", lambda root, revision, subject: False)
     monkeypatch.setattr(cli, "branch_diff_summary", lambda root, branch: "Diff stat:\n file.ts | 2 +")
@@ -3696,6 +3702,7 @@ def test_cleanup_skips_landed_unmerged_branch_when_declined(monkeypatch, tmp_pat
         status="landed",
     ).save(run_dir / "run.json")
     monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "local_branch_exists", lambda root, branch: True)
     monkeypatch.setattr(cli, "is_ancestor", lambda root, ancestor, descendant: False)
     monkeypatch.setattr(cli, "history_has_subject", lambda root, revision, subject: False)
     monkeypatch.setattr(cli, "branch_diff_summary", lambda root, branch: "Diff stat:\n file.ts | 2 +")
@@ -3722,6 +3729,7 @@ def test_cleanup_does_not_merge_review_resolved_branch(monkeypatch, tmp_path: Pa
         outcome="review-resolved",
     ).save(run_dir / "run.json")
     monkeypatch.setattr(cli, "worktree_branches", lambda root: {})
+    monkeypatch.setattr(cli, "local_branch_exists", lambda root, branch: True)
     monkeypatch.setattr(cli, "is_ancestor", lambda root, ancestor, descendant: False)
 
     actions = cli._cleanup_actions(tmp_path, task_id="bd-1")
@@ -3745,6 +3753,7 @@ def test_cleanup_uses_historical_task_commit_when_branch_tip_advanced(monkeypatc
         outcome="landed",
     ).save(run_dir / "run.json")
     monkeypatch.setattr(cli, "worktree_branches", lambda root: {})
+    monkeypatch.setattr(cli, "local_branch_exists", lambda root, branch: True)
     monkeypatch.setattr(cli, "is_ancestor", lambda root, ancestor, descendant: False)
     monkeypatch.setattr(
         cli,
@@ -3775,6 +3784,7 @@ def test_cleanup_uses_recorded_landing_revision_when_source_branch_tip_advanced(
         landed_revision="landed123",
     ).save(run_dir / "run.json")
     monkeypatch.setattr(cli, "worktree_branches", lambda root: {})
+    monkeypatch.setattr(cli, "local_branch_exists", lambda root, branch: True)
     monkeypatch.setattr(
         cli,
         "is_ancestor",

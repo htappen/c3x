@@ -41,6 +41,7 @@ from c3x.gitops import (
     ensure_rewrite_safe,
     history_has_subject,
     is_ancestor,
+    local_branch_exists,
     merge_branch,
     remove_worktree,
     rev_parse,
@@ -2314,6 +2315,8 @@ def _cleanup_actions(root: Path, *, task_id: str | None, require_task_cleanup: b
             continue
         if path == run_record_path(root, record.task_id):
             if record.status == "landed":
+                if not Path(record.worktree).exists() and not local_branch_exists(root, record.branch):
+                    continue
                 try:
                     merged = _landed_record_has_merge_evidence(root, record)
                 except GitError as exc:

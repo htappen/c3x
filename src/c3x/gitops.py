@@ -60,6 +60,11 @@ def worktree_branches(root: Path) -> dict[Path, str]:
     return branches
 
 
+def local_branch_exists(root: Path, branch: str) -> bool:
+    result = _git(root, ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], allow_exit_codes={0, 1})
+    return result.returncode == 0
+
+
 def merge_branch(root: Path, branch: str) -> None:
     commit_ledger_changes(root, "Checkpoint c3x ledger before merge")
     result = _git(

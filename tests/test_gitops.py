@@ -73,3 +73,16 @@ def test_history_has_subject_requires_exact_subject(monkeypatch, tmp_path: Path)
 
     assert gitops.history_has_subject(tmp_path, "HEAD", "Complete c3x task bd-1")
     assert not gitops.history_has_subject(tmp_path, "HEAD", "Complete c3x task bd")
+
+
+def test_local_branch_exists_checks_exact_local_ref(monkeypatch, tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def fake_git(root, args, *, capture=False, allow_exit_codes=None):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(gitops, "_git", fake_git)
+
+    assert gitops.local_branch_exists(tmp_path, "c3x/bd-1")
+    assert calls == [["show-ref", "--verify", "--quiet", "refs/heads/c3x/bd-1"]]
