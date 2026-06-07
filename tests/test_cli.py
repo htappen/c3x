@@ -296,6 +296,103 @@ def test_land_records_landing_branch_and_revision(monkeypatch, tmp_path: Path) -
     assert saved.landed_revision == "landed123"
 
 
+def test_land_nested_blocker_merges_into_original_ancestor_worktree(monkeypatch, tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(id="bd-1", title="original", labels=("flow", "blocked"))
+    beads.items["bd-2"] = BeadSummary(
+        id="bd-2",
+        title="first blocker",
+        description="Blocks: bd-1",
+        labels=("flow", "blocked", "review-fix"),
+    )
+    beads.items["bd-3"] = BeadSummary(
+        id="bd-3",
+        title="nested blocker",
+        description="Blocks: bd-2",
+        labels=("flow", "reviewed", "review-fix"),
+    )
+    ancestor_worktree = tmp_path / ".flow" / "worktrees" / "bd-1"
+    child_worktree = tmp_path / ".flow" / "worktrees" / "bd-3"
+    ancestor_worktree.mkdir(parents=True)
+    child_worktree.mkdir(parents=True)
+    ancestor_run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-original",
+        worktree=str(ancestor_worktree),
+        prompt=str(ancestor_run_dir / "prompt.md"),
+        result=str(ancestor_run_dir / "result.json"),
+        last_message=str(ancestor_run_dir / "last-message.md"),
+        status="blocked",
+    ).save(ancestor_run_dir / "run.json")
+    child_run_dir = tmp_path / ".flow" / "runs" / "bd-3"
+    child = RunRecord(
+        task_id="bd-3",
+        branch="c3x/bd-3-nested",
+        worktree=str(child_worktree),
+        prompt=str(child_run_dir / "prompt.md"),
+        result=str(child_run_dir / "result.json"),
+        last_message=str(child_run_dir / "last-message.md"),
+        status="reviewed",
+    )
+    merges: list[tuple[Path, str]] = []
+    ledger_commits: list[Path] = []
+    monkeypatch.setattr(cli, "current_branch", lambda path: "c3x/bd-1-original" if path == ancestor_worktree else "main")
+    monkeypatch.setattr(cli, "commit_worktree_changes", lambda path, message: None)
+    monkeypatch.setattr(cli, "merge_branch", lambda path, branch: merges.append((path, branch)))
+    monkeypatch.setattr(cli, "commit_ledger_changes", lambda path, message: ledger_commits.append(path))
+    monkeypatch.setattr(cli, "rev_parse", lambda path, revision: "landed123")
+    monkeypatch.setattr(cli, "remove_worktree", lambda root, path, force=False: None)
+    monkeypatch.setattr(cli, "delete_branch", lambda root, branch: None)
+    monkeypatch.setattr(beads, "close", lambda task_id, note: beads.closed.append((task_id, note)))
+
+    cli._land_record(tmp_path, beads, child, cleanup_done=True, close_note="landed")
+
+    saved = RunRecord.load(child_run_dir / "run.json")
+    assert merges == [(ancestor_worktree, "c3x/bd-3-nested")]
+    assert ledger_commits == [ancestor_worktree]
+    assert saved.landing_branch == "c3x/bd-1-original"
+
+
+def test_land_shared_ancestor_branch_does_not_remove_original_worktree(monkeypatch, tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(id="bd-1", title="original", labels=("flow", "blocked"))
+    beads.items["bd-2"] = BeadSummary(
+        id="bd-2",
+        title="blocker",
+        description="Blocks: bd-1",
+        labels=("flow", "reviewed", "review-fix"),
+    )
+    worktree = tmp_path / ".flow" / "worktrees" / "bd-1"
+    worktree.mkdir(parents=True)
+    for task_id in ("bd-1", "bd-2"):
+        run_dir = tmp_path / ".flow" / "runs" / task_id
+        RunRecord(
+            task_id=task_id,
+            branch="c3x/bd-1-original",
+            worktree=str(worktree),
+            prompt=str(run_dir / "prompt.md"),
+            result=str(run_dir / "result.json"),
+            last_message=str(run_dir / "last-message.md"),
+            status="blocked" if task_id == "bd-1" else "reviewed",
+        ).save(run_dir / "run.json")
+    child = RunRecord.load(tmp_path / ".flow" / "runs" / "bd-2" / "run.json")
+    merges: list[tuple[Path, str]] = []
+    removed: list[Path] = []
+    monkeypatch.setattr(cli, "current_branch", lambda path: "c3x/bd-1-original")
+    monkeypatch.setattr(cli, "commit_worktree_changes", lambda path, message: None)
+    monkeypatch.setattr(cli, "merge_branch", lambda path, branch: merges.append((path, branch)))
+    monkeypatch.setattr(cli, "commit_ledger_changes", lambda path, message: None)
+    monkeypatch.setattr(cli, "rev_parse", lambda path, revision: "landed123")
+    monkeypatch.setattr(cli, "remove_worktree", lambda root, path, force=False: removed.append(path))
+    monkeypatch.setattr(beads, "close", lambda task_id, note: beads.closed.append((task_id, note)))
+
+    cli._land_record(tmp_path, beads, child, cleanup_done=True, close_note="landed")
+
+    assert merges == []
+    assert removed == []
+
+
 def test_land_all_uses_oldest_first_and_continues_after_conflict(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _RecordingBeads()

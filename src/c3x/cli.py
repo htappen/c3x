@@ -663,26 +663,57 @@ def _land_record(
     cleanup_done: bool,
     close_note: str,
 ) -> None:
-    landing_branch = current_branch(root)
-    if landing_branch == record.branch or landing_branch.startswith("c3x/"):
+    landing_root, landing_branch, lands_in_ancestor = _landing_target(root, beads, record)
+    if not lands_in_ancestor and (landing_branch == record.branch or landing_branch.startswith("c3x/")):
         raise GitError(
             f"refusing to land {record.task_id} into task branch `{landing_branch}`; "
             "run c3x land from the project landing branch"
         )
     commit_worktree_changes(Path(record.worktree), f"Complete c3x task {record.task_id}")
-    merge_branch(root, record.branch)
+    if landing_branch != record.branch:
+        merge_branch(landing_root, record.branch)
     beads.close(record.task_id, close_note)
     beads.add_labels(record.task_id, ["landed"])
-    commit_ledger_changes(root, f"Close c3x task {record.task_id}")
+    commit_ledger_changes(landing_root, f"Close c3x task {record.task_id}")
     record.status = "landed"
     record.outcome = "landed"
     record.finished_at = _now()
     record.landing_branch = landing_branch
-    record.landed_revision = rev_parse(root, landing_branch)
+    record.landed_revision = rev_parse(landing_root, landing_branch)
     record.save(run_record_path(root, record.task_id))
-    if cleanup_done:
+    if cleanup_done and Path(record.worktree) != landing_root:
         remove_worktree(root, Path(record.worktree), force=True)
-        delete_branch(root, record.branch)
+        if landing_branch != record.branch:
+            delete_branch(root, record.branch)
+
+
+def _landing_target(root: Path, beads: Beads, record: RunRecord) -> tuple[Path, str, bool]:
+    ancestor_id = _blocking_ancestor_id(beads, record.task_id)
+    if ancestor_id and ancestor_id != record.task_id:
+        ancestor = _current_run_record(root, ancestor_id)
+        if ancestor is not None and Path(ancestor.worktree).exists():
+            landing_root = Path(ancestor.worktree)
+            return landing_root, current_branch(landing_root), True
+    return root, current_branch(root), False
+
+
+def _blocking_ancestor_id(beads: Beads, task_id: str) -> str | None:
+    seen = {task_id}
+    ancestor_id: str | None = None
+    current_id = task_id
+    while True:
+        try:
+            current = beads.show(current_id)
+        except (BeadsError, KeyError):
+            return ancestor_id
+        if not isinstance(current, BeadSummary):
+            return ancestor_id
+        parent_id = _review_fix_parent_id(beads, current)
+        if not parent_id or parent_id in seen:
+            return ancestor_id
+        seen.add(parent_id)
+        ancestor_id = parent_id
+        current_id = parent_id
 
 
 @app.command()
