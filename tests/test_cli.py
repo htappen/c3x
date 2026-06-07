@@ -1166,6 +1166,29 @@ def test_supervisor_tick_records_critic_outcome(monkeypatch, tmp_path: Path) -> 
     assert any(event["event"] == "checking critic tasks" and event["detail"] == "critic tasks OK" for event in events)
 
 
+def test_supervisor_tick_continues_when_conflict_resolver_candidate_is_already_landed(
+    monkeypatch, tmp_path: Path
+) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(id="bd-1", title="stale conflict", labels=("flow", "landed"))
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "_import_finished_results", lambda root, beads: None)
+    monkeypatch.setattr(cli, "_plan_inbox", lambda root, beads: None)
+    monkeypatch.setattr(cli, "_maybe_warn_stuck", lambda root, beads: None)
+    monkeypatch.setattr(cli, "_supervisor_idle_reason", lambda root, beads, dispatch: "idle")
+    monkeypatch.setattr(cli, "_conflict_task_ids", lambda root, beads, task_id, all_tasks: ["bd-1"])
+    monkeypatch.setattr(cli, "load_config", lambda root: object())
+    monkeypatch.setattr(
+        cli,
+        "_resolve_conflict_task",
+        lambda root, config, beads, task_id: (_ for _ in ()).throw(ValueError(f"{task_id} is already landed")),
+    )
+
+    cli._supervisor_tick(tmp_path, dispatch=False, resolve_conflicts=True)
+
+    assert ("bd-1", "c3x conflict resolver blocked: bd-1 is already landed") in beads.notes
+
+
 def test_critic_tick_reports_blocked_tasks_without_creating_task() -> None:
     beads = _RecordingBeads()
     beads.items["bd-1"] = BeadSummary(id="bd-1", title="one", labels=("flow", "blocked"))
@@ -4111,7 +4134,7 @@ def test_resolve_conflict_starts_resolver_attempt(monkeypatch, tmp_path: Path) -
     assert any("conflict-resolver" in labels for task_id, labels in beads.added_labels if task_id == "bd-1")
 
 
-def test_conflict_task_ids_skip_running_stale_land_blockers() -> None:
+def test_conflict_task_ids_skip_running_stale_land_blockers(tmp_path: Path) -> None:
     beads = _RecordingBeads()
     beads.items["bd-running"] = BeadSummary(
         id="bd-running",
@@ -4124,7 +4147,28 @@ def test_conflict_task_ids_skip_running_stale_land_blockers() -> None:
         labels=("flow", "land-blocked", "blocker-merge-conflict"),
     )
 
-    assert cli._conflict_task_ids(beads, task_id=None, all_tasks=True) == ["bd-blocked"]
+    assert cli._conflict_task_ids(tmp_path, beads, task_id=None, all_tasks=True) == ["bd-blocked"]
+
+
+def test_conflict_task_ids_skip_already_landed_records(tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-landed"] = BeadSummary(
+        id="bd-landed",
+        title="stale conflict labels",
+        labels=("flow", "land-blocked", "blocker-merge-conflict"),
+    )
+    run_dir = tmp_path / ".flow" / "runs" / "bd-landed"
+    RunRecord(
+        task_id="bd-landed",
+        branch="c3x/bd-landed",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "bd-landed"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="landed",
+    ).save(run_dir / "run.json")
+
+    assert cli._conflict_task_ids(tmp_path, beads, task_id=None, all_tasks=True) == []
 
 
 def test_land_stops_when_root_is_dirty(monkeypatch, tmp_path: Path) -> None:

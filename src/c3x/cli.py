@@ -446,7 +446,7 @@ def resolve_conflict(
     beads = _beads(root)
     try:
         _import_finished_results(root, beads)
-        task_ids = _conflict_task_ids(beads, task_id=task_id, all_tasks=all_tasks)
+        task_ids = _conflict_task_ids(root, beads, task_id=task_id, all_tasks=all_tasks)
         for item_id in task_ids:
             record = _resolve_conflict_task(root, config, beads, item_id)
             console.print(f"[green]Resolving conflict[/green] {item_id} as attempt {record.attempt}")
@@ -1483,11 +1483,15 @@ def _supervisor_tick(
         _write_activity(root, "checking merge-conflict blockers")
         config = load_config(root)
         resolved = 0
-        for item_id in _conflict_task_ids(beads, task_id=None, all_tasks=True):
+        for item_id in _conflict_task_ids(root, beads, task_id=None, all_tasks=True):
             _write_activity(root, f"starting conflict resolver {item_id}")
-            _resolve_conflict_task(root, config, beads, item_id)
-            resolved += 1
-            console.print(f"[green]Conflict resolver started[/green] {item_id}")
+            try:
+                _resolve_conflict_task(root, config, beads, item_id)
+                resolved += 1
+                console.print(f"[green]Conflict resolver started[/green] {item_id}")
+            except (AgentError, BeadsError, GitError, ValueError) as exc:
+                beads.add_note(item_id, f"c3x conflict resolver blocked: {exc}")
+                console.print(f"[yellow]Conflict resolver blocked[/yellow] {item_id}: {exc}")
         if resolved == 0:
             _write_activity_event(root, "not resolving conflicts", "no merge-conflict blockers waiting")
     _maybe_warn_stuck(root, beads)
@@ -1682,7 +1686,7 @@ def _retry_mode_from_flags(
     return selected[0] if selected else "session"
 
 
-def _conflict_task_ids(beads: Beads, *, task_id: str | None, all_tasks: bool) -> list[str]:
+def _conflict_task_ids(root: Path, beads: Beads, *, task_id: str | None, all_tasks: bool) -> list[str]:
     if all_tasks and task_id:
         raise ValueError("pass either a task id or --all, not both")
     if not all_tasks and not task_id:
@@ -1693,7 +1697,12 @@ def _conflict_task_ids(beads: Beads, *, task_id: str | None, all_tasks: bool) ->
             raise ValueError(f"{task_id} is not blocked on a merge conflict")
         return [task_id]
     blocked = _with_labels(beads.list_active(), {"flow", "land-blocked", "blocker-merge-conflict"})
-    return [item.id for item in blocked if "running" not in item.labels]
+    return [
+        item.id
+        for item in blocked
+        if "running" not in item.labels
+        and ((record := _current_run_record(root, item.id)) is None or record.status != "landed")
+    ]
 
 
 def _retry_task(
