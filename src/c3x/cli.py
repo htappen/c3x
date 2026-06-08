@@ -3376,6 +3376,14 @@ def _block_review_with_tasks(
     worker_result: WorkerResult,
     review_result: ReviewResult,
 ) -> None:
+    if _is_review_fix(item):
+        beads.add_note(
+            item.id,
+            f"c3x review fix blocked: {review_result.summary or 'review issues found'}",
+        )
+        beads.add_labels(item.id, ["flow", "blocked", "review-blocked", "blocker-review-issues"])
+        beads.remove_labels(item.id, ["running", "reviewing", "reviewed"])
+        return
     issues = review_result.issues or [
         ReviewIssue(
             title=f"Resolve review blocker for {item.id}",

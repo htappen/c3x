@@ -1712,6 +1712,55 @@ def test_apply_review_result_creates_blocking_cleanup_tasks(tmp_path: Path) -> N
     assert ("bd-1", ["flow", "blocked", "review-blocked", "blocker-review-issues"]) in beads.added_labels
 
 
+def test_apply_review_result_does_not_create_nested_review_fix(tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-2"] = BeadSummary(
+        id="bd-2",
+        title="fix review issue",
+        labels=("flow", "reviewing", "review-fix"),
+    )
+    beads.next_id = 3
+    run_dir = tmp_path / ".flow" / "runs" / "bd-2"
+    record = RunRecord(
+        task_id="bd-2",
+        branch="c3x/bd-2-fix-review-issue",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-2-fix-review-issue"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="completed",
+    )
+    worker_result = WorkerResult(task_id="bd-2", status="completed", summary="Tried cleanup")
+    review_result = ReviewResult(
+        task_id="bd-2",
+        status="blocked",
+        summary="Cleanup still incomplete",
+        issues=[
+            cli.ReviewIssue(
+                title="Finish cleanup",
+                description="The original issue remains.",
+                severity="high",
+            )
+        ],
+    )
+
+    cli._apply_review_result(
+        tmp_path,
+        beads,
+        beads.items["bd-2"],
+        worker_result,
+        review_result,
+        record=record,
+    )
+
+    saved = RunRecord.load(run_dir / "run.json")
+    assert saved.status == "blocked"
+    assert saved.outcome == "review-blocked"
+    assert list(beads.items) == ["bd-2"]
+    assert beads.blockers == []
+    assert ("bd-2", ["flow", "blocked", "review-blocked", "blocker-review-issues"]) in beads.added_labels
+
+
 def test_recover_interrupted_worker_resumes_transient_session(monkeypatch, tmp_path: Path) -> None:
     beads = _RecordingBeads()
     beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", labels=("flow", "running"))
