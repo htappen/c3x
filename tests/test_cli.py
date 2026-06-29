@@ -3643,6 +3643,26 @@ def test_unstick_fix_removes_stale_running_worker_state(monkeypatch, tmp_path: P
     assert ("bd-1", ["running", "reviewing"]) in beads.removed_labels
 
 
+def test_unstick_fix_blocks_stale_running_when_run_record_missing(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="fix",
+        status="in_progress",
+        labels=("flow", "running"),
+    )
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+
+    result = runner.invoke(cli.app, ["unstick", "--fix", "--verify", "none"])
+
+    assert result.exit_code == 0
+    assert "mark-blocked-missing-run-record" in result.stdout
+    assert ("bd-1", ["flow", "blocked", "blocker-run-record-missing"]) in beads.added_labels
+    assert ("bd-1", ["running", "reviewing"]) in beads.removed_labels
+
+
 def test_unstick_does_not_close_contained_dirty_worktree(monkeypatch, tmp_path: Path) -> None:
     beads = _RecordingBeads()
     beads.items["bd-1"] = BeadSummary(

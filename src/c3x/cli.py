@@ -3081,23 +3081,20 @@ def _apply_unstick_candidate(root: Path, beads: Beads, candidate: UnstickCandida
             task_list = ", ".join(task.id for task in cleanup_tasks)
             raise ValueError(f"{candidate.task_id} still has review cleanup blockers: {task_list}")
 
-    record = _load_repaired_current_run_record(root, candidate.task_id)
-    worktree = Path(record.worktree)
-    if worktree.exists() and worktree_has_changes(worktree):
-        try:
-            commit_worktree_changes(worktree, f"Save local changes before unsticking task {candidate.task_id}")
-        except GitError as exc:
-            raise ValueError(f"worker worktree has uncommitted changes that could not be saved: {exc}")
     item = beads.show(candidate.task_id)
     if candidate.action == "mark-blocked-stale-running":
+        record = _optional_repaired_current_run_record(root, candidate.task_id)
+        if record is not None:
+            _commit_unstick_worktree_if_dirty(root, record)
         beads.add_note(candidate.task_id, "c3x unstick removed stale running worker state")
         beads.add_labels(candidate.task_id, ["flow", "blocked", "blocker-worker-not-live"])
         beads.remove_labels(candidate.task_id, ["running", "reviewing"])
-        record.status = "blocked"
-        record.outcome = record.outcome or "worker-not-live"
-        record.pid = None
-        record.finished_at = record.finished_at or _now()
-        record.save(run_record_path(root, candidate.task_id))
+        if record is not None:
+            record.status = "blocked"
+            record.outcome = record.outcome or "worker-not-live"
+            record.pid = None
+            record.finished_at = record.finished_at or _now()
+            record.save(run_record_path(root, candidate.task_id))
         return
     if candidate.action == "mark-completed-from-result":
         evidence = _completed_result_evidence(root, candidate.task_id)
@@ -3121,6 +3118,11 @@ def _apply_unstick_candidate(root: Path, beads: Beads, candidate: UnstickCandida
         )
         record.save(run_record_path(root, candidate.task_id))
         return
+    record = _optional_repaired_current_run_record(root, candidate.task_id)
+    if record is None:
+        _block_missing_run_record(beads, candidate.task_id, FileNotFoundError(str(run_record_path(root, candidate.task_id))))
+        return
+    _commit_unstick_worktree_if_dirty(root, record)
     if candidate.action == "mark-reviewed":
         beads.add_note(candidate.task_id, "c3x unstick repaired stale review state")
         beads.add_labels(candidate.task_id, ["reviewed", "reviewing"])
@@ -3149,6 +3151,24 @@ def _apply_unstick_candidate(root: Path, beads: Beads, candidate: UnstickCandida
         record.save(run_record_path(root, candidate.task_id))
         return
     raise ValueError(f"unknown unstick action: {candidate.action}")
+
+
+def _optional_repaired_current_run_record(root: Path, task_id: str) -> RunRecord | None:
+    try:
+        return _load_repaired_current_run_record(root, task_id)
+    except FileNotFoundError:
+        return None
+
+
+def _commit_unstick_worktree_if_dirty(root: Path, record: RunRecord) -> None:
+    del root
+    worktree = Path(record.worktree)
+    if not worktree.exists() or not worktree_has_changes(worktree):
+        return
+    try:
+        commit_worktree_changes(worktree, f"Save local changes before unsticking task {record.task_id}")
+    except GitError as exc:
+        raise ValueError(f"worker worktree has uncommitted changes that could not be saved: {exc}")
 
 
 def _completed_result_removed_labels(item: BeadSummary) -> list[str]:
