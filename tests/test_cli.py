@@ -732,6 +732,55 @@ def test_status_avoids_deep_beads_and_unstick_scans(monkeypatch, tmp_path: Path)
     assert "queued" in result.stdout
 
 
+def test_status_uses_exported_active_items_when_available(monkeypatch, tmp_path: Path) -> None:
+    class ExportStatusBeads(_RecordingBeads):
+        def list_active_export(self) -> list[BeadSummary]:
+            return [BeadSummary(id="bd-export", title="queued", labels=("flow", "ready"))]
+
+        def list_active(self) -> list[BeadSummary]:
+            raise AssertionError("status should use exported Beads items when available")
+
+        def ready(self) -> list[BeadSummary]:
+            raise AssertionError("status should not run bd ready")
+
+    runner = CliRunner()
+    beads = ExportStatusBeads()
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda root: type("Config", (), {"limits": type("Limits", (), {"max_parallel_workers": 3})()})(),
+    )
+
+    result = runner.invoke(cli.app, ["status"])
+
+    assert result.exit_code == 0
+    assert "bd-export" in result.stdout
+
+
+def test_status_warns_when_embedded_dolt_store_is_large(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _StatusBeads()
+    store = tmp_path / ".beads" / "embeddeddolt"
+    store.mkdir(parents=True)
+    (store / "chunk").write_bytes(b"x" * 8)
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "_beads_storage_warning", lambda root: "embedded Dolt store is large")
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda root: type("Config", (), {"limits": type("Limits", (), {"max_parallel_workers": 3})()})(),
+    )
+
+    result = runner.invoke(cli.app, ["status"])
+
+    assert result.exit_code == 0
+    assert "maintenance" in result.stdout
+    assert "embedded Dolt store is large" in result.stdout
+
+
 def test_status_reviewing_count_excludes_reviewed_and_land_blocked(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _RecordingBeads()

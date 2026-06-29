@@ -120,6 +120,7 @@ class StatusSnapshot:
     ready_items: list[BeadSummary]
     canonical_records: list[RunRecord]
     live_records: list[RunRecord]
+    beads_storage_warning: str = ""
 
 
 def _root() -> Path:
@@ -1003,7 +1004,10 @@ def _build_status_view(root: Path) -> Group:
 def _status_snapshot(root: Path) -> StatusSnapshot:
     config = load_config(root)
     beads = _beads(root)
-    active_items = beads.list_active()
+    list_active_export = getattr(beads, "list_active_export", None)
+    active_items = list_active_export() if callable(list_active_export) else []
+    if not active_items:
+        active_items = beads.list_active()
     ready_items = [item for item in active_items if "ready" in item.labels]
     canonical_records = _canonical_run_records(root)
     live_records = _live_worker_records(root, canonical_records=canonical_records)
@@ -1013,6 +1017,7 @@ def _status_snapshot(root: Path) -> StatusSnapshot:
         ready_items=ready_items,
         canonical_records=canonical_records,
         live_records=live_records,
+        beads_storage_warning=_beads_storage_warning(root),
     )
 
 
@@ -1177,6 +1182,8 @@ def _build_status_table(root: Path, snapshot: StatusSnapshot | None = None) -> T
     for row in rows:
         table.add_row(row.state, row.stage, str(row.count), row.detail)
     table.add_row("capacity", "workers", str(config.limits.max_parallel_workers), "max parallel workers")
+    if snapshot.beads_storage_warning:
+        table.add_row("maintenance", "beads", "!", snapshot.beads_storage_warning)
     return table
 
 
@@ -2518,6 +2525,27 @@ def _format_bytes(size: int) -> str:
     if size < 1024 * 1024:
         return f"{size / 1024:.1f} KiB"
     return f"{size / (1024 * 1024):.1f} MiB"
+
+
+def _beads_storage_warning(root: Path, *, threshold: int = 256 * 1024 * 1024) -> str:
+    path = root / ".beads" / "embeddeddolt"
+    if not path.exists():
+        return ""
+    size = _directory_size(path)
+    if size < threshold:
+        return ""
+    return f"embedded Dolt store is {_format_bytes(size)}; run bd gc/compact if status is slow"
+
+
+def _directory_size(path: Path) -> int:
+    total = 0
+    for directory, _, filenames in os.walk(path):
+        for filename in filenames:
+            try:
+                total += (Path(directory) / filename).stat().st_size
+            except OSError:
+                continue
+    return total
 
 
 def _large_bead_compaction_summary(item: BeadSummary, size: int) -> str:

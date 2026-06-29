@@ -30,6 +30,7 @@ class Beads:
     def __init__(self, root: Path, executable: str = "bd") -> None:
         self.root = root
         self.executable = executable
+        self._summary_cache: dict[str, list[BeadSummary]] = {}
 
     def require_installed(self) -> None:
         if shutil.which(self.executable) is None:
@@ -41,6 +42,7 @@ class Beads:
     def init(self) -> None:
         self.require_installed()
         self._run(["init", "--quiet"], expect_json=False)
+        self._invalidate_cache()
 
     def create_inbox_item(
         self,
@@ -62,23 +64,31 @@ class Beads:
         if description:
             args.extend(["--description", description])
         args.append("--json")
-        return self._run_json(args)
+        created = self._run_json(args)
+        self._invalidate_cache()
+        return created
 
     def list_open(self) -> list[BeadSummary]:
-        payload = self._run_json(["list", "--status", "open", "--limit", "0", "--json"])
-        return _summaries(payload)
+        return self._cached_summaries("open", ["list", "--status", "open", "--limit", "0", "--json"])
 
     def list_active(self) -> list[BeadSummary]:
-        payload = self._run_json(["list", "--status", "open,in_progress,blocked", "--limit", "0", "--json"])
-        return _summaries(payload)
+        return self._cached_summaries(
+            "active",
+            ["list", "--status", "open,in_progress,blocked", "--limit", "0", "--json"],
+        )
 
     def list_closed(self) -> list[BeadSummary]:
-        payload = self._run_json(["list", "--status", "closed", "--limit", "0", "--json"])
-        return _summaries(payload)
+        return self._cached_summaries("closed", ["list", "--status", "closed", "--limit", "0", "--json"])
+
+    def list_active_export(self) -> list[BeadSummary]:
+        return [
+            item
+            for item in self._export_summaries()
+            if item.status in {"open", "in_progress", "blocked"} or item.status is None
+        ]
 
     def ready(self) -> list[BeadSummary]:
-        payload = self._run_json(["ready", "--json"])
-        return _summaries(payload)
+        return self._cached_summaries("ready", ["ready", "--json"])
 
     def dependencies(self, task_id: str, *, direction: str = "down", dep_type: str = "blocks") -> list[dict[str, Any]]:
         args = ["dep", "list", task_id, "--direction", direction, "--type", dep_type, "--json"]
@@ -103,9 +113,11 @@ class Beads:
 
     def add_note(self, task_id: str, note: str) -> None:
         self._run(["note", task_id, note], expect_json=False)
+        self._invalidate_cache()
 
     def set_status(self, task_id: str, status: str) -> None:
         self._run(["update", task_id, "--status", status], expect_json=False)
+        self._invalidate_cache()
 
     def add_labels(self, task_id: str, labels: list[str]) -> None:
         if not labels:
@@ -114,6 +126,7 @@ class Beads:
         for label in labels:
             args.extend(["--add-label", label])
         self._run(args, expect_json=False)
+        self._invalidate_cache()
 
     def remove_labels(self, task_id: str, labels: list[str]) -> None:
         if not labels:
@@ -122,9 +135,11 @@ class Beads:
         for label in labels:
             args.extend(["--remove-label", label])
         self._run(args, expect_json=False)
+        self._invalidate_cache()
 
     def close(self, task_id: str, reason: str) -> None:
         self._run(["close", task_id, "--reason", reason], expect_json=False)
+        self._invalidate_cache()
 
     def compact_issue(self, task_id: str, summary: str, *, issue: BeadSummary | None = None) -> None:
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md", delete=True) as summary_file:
@@ -135,6 +150,7 @@ class Beads:
                     ["admin", "compact", "--apply", "--id", task_id, "--summary", summary_file.name, "--force"],
                     expect_json=False,
                 )
+                self._invalidate_cache()
                 return
             except BeadsError as exc:
                 if "not yet supported in embedded mode" not in str(exc):
@@ -159,6 +175,7 @@ class Beads:
             import_file.write(json.dumps(payload) + "\n")
             import_file.flush()
             self._run(["import", import_file.name], expect_json=False)
+        self._invalidate_cache()
 
     def create_task(
         self,
@@ -182,13 +199,46 @@ class Beads:
             ",".join(labels),
             "--json",
         ]
-        return self._run_json(args)
+        created = self._run_json(args)
+        self._invalidate_cache()
+        return created
 
     def add_blocker(self, blocker_id: str, blocked_id: str) -> None:
         self._run(["dep", blocker_id, "--blocks", blocked_id], expect_json=False)
+        self._invalidate_cache()
 
     def remove_blocker(self, blocker_id: str, blocked_id: str) -> None:
         self._run(["dep", "remove", blocked_id, blocker_id], expect_json=False)
+        self._invalidate_cache()
+
+    def _cached_summaries(self, key: str, args: list[str]) -> list[BeadSummary]:
+        cached = self._summary_cache.get(key)
+        if cached is None:
+            cached = _summaries(self._run_json(args))
+            self._summary_cache[key] = cached
+        return list(cached)
+
+    def _export_summaries(self) -> list[BeadSummary]:
+        cached = self._summary_cache.get("export")
+        if cached is not None:
+            return list(cached)
+        path = self.root / ".beads" / "issues.jsonl"
+        if not path.exists():
+            return []
+        summaries: list[BeadSummary] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            summaries.extend(_summaries([payload]))
+        self._summary_cache["export"] = summaries
+        return list(summaries)
+
+    def _invalidate_cache(self) -> None:
+        self._summary_cache.clear()
 
     def _run_json(self, args: list[str]) -> Any:
         result = self._run(args, expect_json=True)
