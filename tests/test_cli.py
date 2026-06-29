@@ -866,6 +866,53 @@ def test_status_renders_captured_codex_status(monkeypatch, tmp_path: Path) -> No
     assert "Model: gpt-5.4-mini Context: 12k / 50k" in result.stdout
 
 
+def test_status_renders_captured_opencode_status(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _StatusBeads()
+    run_dir = tmp_path / ".flow" / "runs" / "bd-3"
+    last_message = run_dir / "last-message.md"
+    last_message.parent.mkdir(parents=True)
+    last_message.write_text(
+        "opencode /status\n"
+        "Model: opencode/gpt-5.1-codex\n"
+        "Context: 8k / 200k\n"
+        "\n"
+        "continuing task",
+        encoding="utf-8",
+    )
+    RunRecord(
+        task_id="bd-3",
+        branch="c3x/bd-3-running",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-3-running"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(last_message),
+        provider="opencode",
+        pid=1234,
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(cli, "_process_is_running", lambda pid: pid == 1234)
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda root: type(
+            "Config",
+            (),
+            {
+                "agents": type("Agents", (), {"provider": "opencode"})(),
+                "limits": type("Limits", (), {"max_parallel_workers": 3})(),
+            },
+        )(),
+    )
+
+    result = runner.invoke(cli.app, ["status"])
+
+    assert result.exit_code == 0
+    assert "opencode /status" in result.stdout
+    assert "Model: opencode/gpt-5.1-codex Context: 8k / 200k" in result.stdout
+
+
 def test_status_renders_usage_limit_fallback_for_blocked_worker(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _RecordingBeads()

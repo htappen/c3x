@@ -12,6 +12,7 @@ CONFIG_PATH = Path(FLOW_DIR) / "config.yml"
 
 # Role names that appear inside a per-provider model block.
 _ROLE_FIELDS = {"architect", "worker", "reviewer", "critic", "verify"}
+_SUPPORTED_PROVIDERS = {"codex", "antigravity", "opencode"}
 
 
 class AgentConfig(BaseModel):
@@ -66,20 +67,45 @@ class AgentConfig(BaseModel):
             "{prompt_content}",
         ]
     )
+    opencode_command: str = "opencode"
+    opencode_args: list[str] = Field(
+        default_factory=lambda: [
+            "run",
+            "--model",
+            "{model}",
+            "--dir",
+            "{worktree}",
+            "--dangerously-skip-permissions",
+            "{prompt_content}",
+        ]
+    )
+    opencode_resume_args: list[str] = Field(
+        default_factory=lambda: [
+            "run",
+            "--session",
+            "{session_id}",
+            "--model",
+            "{model}",
+            "--dir",
+            "{worktree}",
+            "--dangerously-skip-permissions",
+            "{prompt_content}",
+        ]
+    )
 
     @field_validator("provider", mode="after")
     @classmethod
     def _validate_provider(cls, value: str) -> str:
-        if value not in {"codex", "antigravity"}:
-            raise ValueError("agents.provider must be 'codex' or 'antigravity'")
+        if value not in _SUPPORTED_PROVIDERS:
+            raise ValueError("agents.provider must be 'codex', 'antigravity', or 'opencode'")
         return value
 
     @field_validator("provider_overrides", mode="after")
     @classmethod
     def _validate_provider_overrides(cls, value: dict[str, str]) -> dict[str, str]:
-        invalid = sorted({provider for provider in value.values() if provider not in {"codex", "antigravity"}})
+        invalid = sorted({provider for provider in value.values() if provider not in _SUPPORTED_PROVIDERS})
         if invalid:
-            raise ValueError("agents.provider_overrides values must be 'codex' or 'antigravity'")
+            raise ValueError("agents.provider_overrides values must be 'codex', 'antigravity', or 'opencode'")
         return value
 
 
@@ -102,14 +128,21 @@ _DEFAULT_PROVIDER_MODELS: dict[str, ProviderModelConfig] = {
         critic="Gemini 3.5 Flash (Medium)",
         verify="Gemini 3.5 Flash (Medium)",
     ),
+    "opencode": ProviderModelConfig(
+        architect="opencode/gpt-5.1-codex",
+        worker="opencode/gpt-5.1-codex",
+        reviewer="opencode/gpt-5.1-codex",
+        critic="opencode/gpt-5.1-codex",
+        verify="opencode/gpt-5.1-codex",
+    ),
 }
 
 
 class ModelConfig(BaseModel):
     """Per-provider model configuration.
 
-    Keyed by provider name (e.g. ``"codex"``, ``"antigravity"``).  Access a provider's
-    models with ``config.models["codex"]`` or the helper
+    Keyed by provider name (e.g. ``"codex"``, ``"antigravity"``, ``"opencode"``).
+    Access a provider's models with ``config.models["codex"]`` or the helper
     ``C3xConfig.models_for_provider(provider)``.
     """
 
@@ -123,7 +156,7 @@ class ModelConfig(BaseModel):
         """Accept a raw dict and normalise it into ``{"root": {...}}``.
 
         Handles two raw shapes:
-        * New format: ``{"codex": {...}, "antigravity": {...}}``
+        * New format: ``{"codex": {...}, "antigravity": {...}, "opencode": {...}}``
         * Legacy flat format: ``{"architect": "...", "worker": "...", ...}``
 
         Empty dicts and non-dict values are passed through unchanged so that
@@ -199,6 +232,9 @@ def migrate_flat_models(flat: dict[str, Any]) -> dict[str, dict[str, Any]]:
             architect: gpt-5.4
             worker: gpt-5.4-mini
           antigravity:
+            architect: gpt-5.4
+            worker: gpt-5.4-mini
+          opencode:
             architect: gpt-5.4
             worker: gpt-5.4-mini
     """

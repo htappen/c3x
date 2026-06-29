@@ -1137,6 +1137,7 @@ def _extract_codex_status(text: str) -> str:
             or normalized.startswith("codex /status")
             or normalized.startswith("antigravity /status")
             or normalized.startswith("agy /status")
+            or normalized.startswith("opencode /status")
         ):
             marker = index
     if marker < 0:

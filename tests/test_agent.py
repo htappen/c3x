@@ -645,3 +645,152 @@ def test_agent_command_expands_user_path_antigravity(tmp_path: Path, monkeypatch
     )
 
     assert command[0] == "/home/testuser/bin/fake-agy"
+
+
+def test_agent_command_substitutes_runtime_paths_opencode(tmp_path: Path) -> None:
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("Task: bd-1\nHello prompt content", encoding="utf-8")
+
+    config = C3xConfig.model_validate(
+        {
+            "models": {"opencode": {"worker": "opencode/test-worker"}},
+            "agents": {
+                "provider": "opencode",
+                "opencode_command": "fake-opencode",
+                "opencode_args": [
+                    "run",
+                    "--model",
+                    "{model}",
+                    "--dir",
+                    "{worktree}",
+                    "--dangerously-skip-permissions",
+                    "{prompt_content}",
+                ],
+            },
+        }
+    )
+
+    command = _agent_command(
+        config,
+        tmp_path / "wt",
+        prompt_file,
+        tmp_path / "result.json",
+        tmp_path / "last.md",
+    )
+
+    assert command == [
+        "fake-opencode",
+        "run",
+        "--model",
+        "opencode/test-worker",
+        "--dir",
+        str(tmp_path / "wt"),
+        "--dangerously-skip-permissions",
+        "Task: bd-1\nHello prompt content",
+    ]
+
+
+def test_agent_command_can_resume_session_opencode(tmp_path: Path) -> None:
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("Hello prompt content", encoding="utf-8")
+
+    config = C3xConfig.model_validate(
+        {
+            "agents": {
+                "provider": "opencode",
+                "opencode_command": "fake-opencode",
+                "opencode_resume_args": [
+                    "run",
+                    "--session",
+                    "{session_id}",
+                    "--model",
+                    "{model}",
+                    "--dir",
+                    "{worktree}",
+                    "{prompt_content}",
+                ],
+            },
+        }
+    )
+
+    command = _agent_command(
+        config,
+        tmp_path / "wt",
+        prompt_file,
+        tmp_path / "result.json",
+        tmp_path / "last.md",
+        resume_session_id="session-123",
+    )
+
+    assert command == [
+        "fake-opencode",
+        "run",
+        "--session",
+        "session-123",
+        "--model",
+        "opencode/gpt-5.1-codex",
+        "--dir",
+        str(tmp_path / "wt"),
+        "Hello prompt content",
+    ]
+
+
+def test_start_worker_uses_opencode_provider_override_and_model(monkeypatch, tmp_path: Path) -> None:
+    launched: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 12345
+
+    def fake_popen(command: list[str], **kwargs: object) -> FakeProcess:
+        launched["command"] = command
+        return FakeProcess()
+
+    monkeypatch.setattr(agent, "create_worktree", lambda root, branch, worktree: worktree.mkdir(parents=True))
+    monkeypatch.setattr(agent.subprocess, "Popen", fake_popen)
+    config = C3xConfig.model_validate(
+        {
+            "models": {"opencode": {"worker": "opencode/worker-model"}},
+            "agents": {
+                "provider": "codex",
+                "provider_overrides": {"worker": "opencode"},
+                "codex_command": "fake-codex",
+                "codex_args": ["{prompt}"],
+                "opencode_command": "fake-opencode",
+                "opencode_args": ["run", "--model", "{model}", "{prompt_content}"],
+            },
+        }
+    )
+
+    record = start_worker(tmp_path, config, BeadSummary(id="bd-1", title="Fix auth"))
+
+    assert launched["command"][:3] == ["fake-opencode", "run", "--model"]
+    assert launched["command"][3] == "opencode/worker-model"
+    assert record.provider == "opencode"
+    assert record.task_type == "worker"
+
+
+def test_agent_command_expands_user_path_opencode(tmp_path: Path, monkeypatch) -> None:
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("Hello", encoding="utf-8")
+
+    config = C3xConfig.model_validate(
+        {
+            "agents": {
+                "provider": "opencode",
+                "opencode_command": "~/bin/fake-opencode",
+                "opencode_args": ["{prompt}"],
+            }
+        }
+    )
+
+    monkeypatch.setenv("HOME", "/home/testuser")
+
+    command = _agent_command(
+        config,
+        tmp_path / "wt",
+        prompt_file,
+        tmp_path / "result.json",
+        tmp_path / "last.md",
+    )
+
+    assert command[0] == "/home/testuser/bin/fake-opencode"

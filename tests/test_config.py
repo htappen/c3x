@@ -29,6 +29,9 @@ def test_load_config_uses_defaults_when_missing(tmp_path: Path) -> None:
     assert config.agents.antigravity_command == "~/.local/bin/agy.va39"
     assert "--print" in config.agents.antigravity_args
     assert "--conversation" in config.agents.antigravity_resume_args
+    assert config.agents.opencode_command == "opencode"
+    assert "run" in config.agents.opencode_args
+    assert "--session" in config.agents.opencode_resume_args
     assert config.limits.max_parallel_workers == 3
 
 
@@ -42,6 +45,7 @@ agents:
   provider_overrides:
     worker: antigravity
     conflict_resolver: codex
+    reviewer: opencode
 """,
         encoding="utf-8",
     )
@@ -52,6 +56,7 @@ agents:
     assert config.agents.provider_overrides == {
         "worker": "antigravity",
         "conflict_resolver": "codex",
+        "reviewer": "opencode",
     }
 
 
@@ -65,8 +70,10 @@ def test_default_config_has_per_provider_models(tmp_path: Path) -> None:
 
     assert "codex" in config.models.root
     assert "antigravity" in config.models.root
+    assert "opencode" in config.models.root
     assert isinstance(config.models["codex"], ProviderModelConfig)
     assert config.models_for_provider("antigravity").worker == "Gemini 3.5 Flash (Medium)"
+    assert config.models_for_provider("opencode").worker == "opencode/gpt-5.1-codex"
 
 
 def test_models_for_provider_returns_correct_block(tmp_path: Path) -> None:
@@ -87,6 +94,12 @@ models:
     reviewer: claude-sonnet
     critic: claude-sonnet
     verify: claude-sonnet
+  opencode:
+    worker: opencode/claude-sonnet
+    architect: opencode/claude-opus
+    reviewer: opencode/claude-sonnet
+    critic: opencode/claude-sonnet
+    verify: opencode/claude-sonnet
 """,
         encoding="utf-8",
     )
@@ -95,6 +108,7 @@ models:
 
     assert config.models_for_provider("codex").worker == "o4-mini"
     assert config.models_for_provider("antigravity").worker == "claude-sonnet"
+    assert config.models_for_provider("opencode").worker == "opencode/claude-sonnet"
 
 
 def test_models_for_provider_falls_back_to_codex_defaults(tmp_path: Path) -> None:
@@ -146,8 +160,10 @@ def test_migrate_flat_models_produces_per_provider_dict() -> None:
 
     assert "codex" in result
     assert "antigravity" in result
+    assert "opencode" in result
     assert result["codex"]["worker"] == "gpt-5.4-mini"
     assert result["antigravity"]["worker"] == "gpt-5.4-mini"
+    assert result["opencode"]["worker"] == "gpt-5.4-mini"
 
 
 def test_migrate_config_data_migrates_flat_models_section() -> None:

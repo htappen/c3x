@@ -348,23 +348,41 @@ def _agent_command(
     }
 
     if provider == "antigravity":
-        command_str = config.agents.antigravity_command
-        executable = shlex.split(command_str)
-        if not executable:
-            raise AgentError("agents.antigravity_command cannot be empty")
-        executable[0] = str(Path(executable[0]).expanduser())
-        template = config.agents.antigravity_resume_args if resume_session_id else config.agents.antigravity_args
-        args = [arg.format(**mapping) for arg in template]
-        return [*executable, *args]
+        return _provider_command(
+            command_str=config.agents.antigravity_command,
+            args=config.agents.antigravity_resume_args if resume_session_id else config.agents.antigravity_args,
+            mapping=mapping,
+            field_name="agents.antigravity_command",
+        )
+    if provider == "opencode":
+        return _provider_command(
+            command_str=config.agents.opencode_command,
+            args=config.agents.opencode_resume_args if resume_session_id else config.agents.opencode_args,
+            mapping=mapping,
+            field_name="agents.opencode_command",
+        )
 
-    command_str = config.agents.codex_command
+    return _provider_command(
+        command_str=config.agents.codex_command,
+        args=config.agents.codex_resume_args if resume_session_id else config.agents.codex_args,
+        mapping=mapping,
+        field_name="agents.codex_command",
+    )
+
+
+def _provider_command(
+    *,
+    command_str: str,
+    args: list[str],
+    mapping: dict[str, str],
+    field_name: str,
+) -> list[str]:
     executable = shlex.split(command_str)
     if not executable:
-        raise AgentError("agents.codex_command cannot be empty")
+        raise AgentError(f"{field_name} cannot be empty")
     executable[0] = str(Path(executable[0]).expanduser())
-    template = config.agents.codex_resume_args if resume_session_id else config.agents.codex_args
-    args = [arg.format(**mapping) for arg in template]
-    return [*executable, *args]
+    expanded_args = [arg.format(**mapping) for arg in args]
+    return [*executable, *expanded_args]
 
 
 def _provider_for_task(config: C3xConfig, task_type: str) -> str:
