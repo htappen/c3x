@@ -626,6 +626,30 @@ def test_auto_review_blocks_when_record_worktree_is_missing(monkeypatch, tmp_pat
     assert ("bd-1", ["running", "reviewing", "reviewed"]) in beads.removed_labels
 
 
+def test_auto_review_blocks_when_run_record_is_missing(monkeypatch, tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(id="bd-1", title="fix", labels=("flow", "reviewing", "completed-by-agent"))
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "result.json").write_text(
+        WorkerResult(task_id="bd-1", status="completed", summary="done").model_dump_json(),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(cli, "load_config", lambda root: object())
+    monkeypatch.setattr(
+        cli,
+        "run_reviewer",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("reviewer should not run")),
+    )
+
+    cli._auto_review(tmp_path, beads)
+
+    assert any("missing run record" in note for _, note in beads.notes)
+    assert ("bd-1", ["flow", "blocked", "blocker-run-record-missing"]) in beads.added_labels
+    assert ("bd-1", ["running", "reviewing", "reviewed", "completed-by-agent"]) in beads.removed_labels
+
+
 def test_add_no_validate_leaves_feedback_unplanned(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _RecordingBeads()

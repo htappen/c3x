@@ -3331,6 +3331,9 @@ def _auto_review(root: Path, beads: Beads) -> None:
         except AgentError as exc:
             beads.add_note(item.id, f"c3x auto-review deferred: {exc}")
             console.print(f"[yellow]Review deferred[/yellow] {item.id}: {exc}")
+        except FileNotFoundError as exc:
+            _block_missing_run_record(beads, item.id, exc)
+            console.print(f"[yellow]Review blocked[/yellow] {item.id}: missing run record")
         except (BeadsError, GitError, ValueError) as exc:
             if result is not None and record is not None and not isinstance(exc, BeadsError):
                 try:
@@ -3343,6 +3346,12 @@ def _auto_review(root: Path, beads: Beads) -> None:
             beads.add_labels(item.id, ["flow", "blocked", "review-blocked"])
             beads.remove_labels(item.id, ["reviewing"])
             console.print(f"[yellow]Review blocked[/yellow] {item.id}: {exc}")
+
+
+def _block_missing_run_record(beads: Beads, task_id: str, exc: FileNotFoundError) -> None:
+    beads.add_note(task_id, f"c3x auto-review blocked: missing run record ({exc})")
+    beads.add_labels(task_id, ["flow", "blocked", "blocker-run-record-missing"])
+    beads.remove_labels(task_id, ["running", "reviewing", "reviewed", "completed-by-agent"])
 
 
 def _commit_worktree_before_review(record: RunRecord) -> None:
