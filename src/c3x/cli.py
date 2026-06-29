@@ -2674,6 +2674,12 @@ def _unstick_candidates(root: Path, beads: Beads, *, task_id: str | None, verify
         list_closed = getattr(beads, "list_closed", None)
         if callable(list_closed):
             closed_cleanup_by_blocked = _review_cleanup_index(list_closed())
+        else:
+            in_memory_items = getattr(beads, "items", None)
+            if isinstance(in_memory_items, dict):
+                closed_cleanup_by_blocked = _review_cleanup_index(
+                    [item for item in in_memory_items.values() if getattr(item, "status", None) == "closed"]
+                )
     run_records = _run_record_paths(root)
     records_by_task = {
         record.task_id: record
@@ -2689,7 +2695,7 @@ def _unstick_candidates(root: Path, beads: Beads, *, task_id: str | None, verify
                 *cleanup_by_blocked.get(item.id, []),
                 *closed_cleanup_by_blocked.get(item.id, []),
             ]
-            if not direct_cleanup_tasks:
+            if not direct_cleanup_tasks and task_id:
                 direct_cleanup_tasks = _direct_review_cleanup_tasks(beads, item.id)
             if direct_cleanup_tasks and all(cleanup.status == "closed" for cleanup in direct_cleanup_tasks):
                 candidates.append(

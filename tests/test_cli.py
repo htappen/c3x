@@ -3499,6 +3499,42 @@ def test_unstick_scans_run_records_once_and_defers_cleanup_lookup(monkeypatch, t
     assert calls == 1
 
 
+def test_unstick_all_uses_cached_cleanup_index_without_dependency_lookup(monkeypatch, tmp_path: Path) -> None:
+    class FastUnstickBeads(_RecordingBeads):
+        def dependencies(self, task_id: str, *, direction: str = "down", dep_type: str = "blocks") -> list[dict[str, str]]:
+            raise AssertionError("broad unstick must not query dependencies per task")
+
+    beads = FastUnstickBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="original",
+        status="in_progress",
+        labels=("flow", "blocked", "review-blocked", "blocker-review-issues"),
+    )
+    beads.items["bd-2"] = BeadSummary(
+        id="bd-2",
+        title="Fix review issue for bd-1",
+        description="Blocks: bd-1",
+        status="open",
+        labels=("flow", "blocked", "review-fix"),
+    )
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-original",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-original"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="blocked",
+        outcome="review-blocked",
+    ).save(run_dir / "run.json")
+
+    candidates = cli._unstick_candidates(tmp_path, beads, task_id=None, verify_mode="none")
+
+    assert candidates == []
+
+
 def test_unstick_fix_removes_stale_running_worker_state(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _RecordingBeads()
