@@ -865,6 +865,43 @@ def test_workflow_rows_classify_every_active_flow_item_once(monkeypatch, tmp_pat
     assert "worker slots available" in queued.detail
 
 
+def test_workflow_rows_treat_ready_item_as_queued_despite_stale_terminal_record(
+    monkeypatch, tmp_path: Path
+) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-ready"] = BeadSummary(
+        id="bd-ready",
+        title="queued",
+        status="open",
+        labels=("flow", "ready"),
+    )
+    run_dir = tmp_path / ".flow" / "runs" / "bd-ready"
+    RunRecord(
+        task_id="bd-ready",
+        branch="c3x/bd-ready-old",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-ready-old"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="completed",
+        finished_at="2026-05-25T00:00:00+00:00",
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda root: type("Config", (), {"limits": type("Limits", (), {"max_parallel_workers": 1})()})(),
+    )
+
+    rows = cli._workflow_rows(tmp_path, beads.list_active(), beads.ready())
+
+    queued = next(row for row in rows if row.stage == "queued")
+    review = next(row for row in rows if row.stage == "review")
+    blocked = next(row for row in rows if row.stage == "blocked")
+    assert queued.count == 1
+    assert review.count == 0
+    assert blocked.count == 0
+
+
 def test_status_renders_supervisor_activity_and_worker_latest_message(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _StatusBeads()
@@ -3570,6 +3607,48 @@ def test_unstick_scans_run_records_once_and_defers_cleanup_lookup(monkeypatch, t
 
     assert candidates == []
     assert calls == 1
+
+
+def test_unstick_ignores_completed_evidence_for_ready_task(tmp_path: Path) -> None:
+    beads = _RecordingBeads()
+    beads.items["bd-1"] = BeadSummary(
+        id="bd-1",
+        title="queued",
+        status="open",
+        labels=("flow", "ready"),
+    )
+    run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-old"
+    result_path = worktree / ".c3x" / "result.json"
+    result_path.parent.mkdir(parents=True)
+    result_path.write_text(
+        WorkerResult(task_id="bd-1", status="completed", summary="old result").model_dump_json(),
+        encoding="utf-8",
+    )
+    RunRecord(
+        task_id="bd-1",
+        branch="c3x/bd-1-old",
+        worktree=str(worktree),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(result_path),
+        last_message=str(run_dir / "last-message.md"),
+        status="blocked",
+        outcome="missing-result",
+    ).save(run_dir / "run.json")
+
+    candidates = cli._unstick_candidates(tmp_path, beads, task_id=None, verify_mode="none")
+    snapshot_candidates = cli._status_unstick_candidates(
+        cli.StatusSnapshot(
+            config=type("Config", (), {"limits": type("Limits", (), {"max_parallel_workers": 1})()})(),
+            active_items=beads.list_active(),
+            ready_items=beads.ready(),
+            canonical_records=[RunRecord.load(run_dir / "run.json")],
+            live_records=[],
+        )
+    )
+
+    assert candidates == []
+    assert snapshot_candidates == []
 
 
 def test_unstick_all_uses_cached_cleanup_index_without_dependency_lookup(monkeypatch, tmp_path: Path) -> None:

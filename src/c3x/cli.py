@@ -1203,8 +1203,11 @@ def _build_unstick_table(snapshot: StatusSnapshot) -> Table:
 
 def _status_unstick_candidates(snapshot: StatusSnapshot) -> list[UnstickCandidate]:
     records = {record.task_id: record for record in snapshot.canonical_records}
+    ready_ids = {item.id for item in snapshot.ready_items if "flow" in item.labels}
     candidates: list[UnstickCandidate] = []
     for item in _with_labels(snapshot.active_items, {"flow"}):
+        if _is_ready_flow_item(item, ready_ids=ready_ids):
+            continue
         record = records.get(item.id)
         if record is None:
             if "running" in item.labels:
@@ -1315,7 +1318,7 @@ def _workflow_key(
 ) -> tuple[str, str]:
     labels = set(item.labels)
     record = records.get(item.id)
-    if "blocked" in labels or item.status == "blocked" or (record is not None and record.status == "blocked"):
+    if "blocked" in labels or item.status == "blocked":
         return ("blocked", "blocked")
     if "question" in labels or "needs-human-clarification" in labels:
         return ("not picked up", "questions")
@@ -1323,15 +1326,21 @@ def _workflow_key(
         return ("not picked up", "submitted")
     if item.id in live_task_ids:
         return ("being worked", "worker")
+    if "running" in labels:
+        return ("blocked", "blocked")
+    if _is_ready_flow_item(item, ready_ids=ready_ids):
+        return ("not picked up", "queued")
+    if record is not None and record.status == "blocked":
+        return ("blocked", "blocked")
     if "reviewed" in labels or (record is not None and record.status == "reviewed"):
         return ("being worked", "land")
     if "reviewing" in labels or "completed-by-agent" in labels or (record is not None and record.status == "completed"):
         return ("being worked", "review")
-    if "running" in labels:
-        return ("blocked", "blocked")
-    if item.id in ready_ids or "ready" in labels:
-        return ("not picked up", "queued")
     return ("unknown", "needs sync")
+
+
+def _is_ready_flow_item(item: BeadSummary, *, ready_ids: set[str]) -> bool:
+    return item.id in ready_ids or ("flow" in item.labels and "ready" in item.labels)
 
 
 def _workflow_row(
@@ -2696,6 +2705,7 @@ def _is_missing_ref_error(exc: GitError) -> bool:
 def _unstick_candidates(root: Path, beads: Beads, *, task_id: str | None, verify_mode: str) -> list[UnstickCandidate]:
     active_items = _with_labels(beads.list_active(), {"flow"})
     items = [beads.show(task_id)] if task_id else active_items
+    ready_ids = {item.id for item in beads.ready() if "flow" in item.labels}
     cleanup_by_blocked = _review_cleanup_index(active_items)
     closed_cleanup_by_blocked: dict[str, list[BeadSummary]] = {}
     if any({"review-blocked", "blocker-review-issues"}.intersection(item.labels) for item in items):
@@ -2717,6 +2727,8 @@ def _unstick_candidates(root: Path, beads: Beads, *, task_id: str | None, verify
     candidates: list[UnstickCandidate] = []
     conflict_scan: bool | None = None
     for item in items:
+        if _is_ready_flow_item(item, ready_ids=ready_ids):
+            continue
         record = records_by_task.get(item.id)
         if record is not None and {"review-blocked", "blocker-review-issues"}.intersection(item.labels):
             direct_cleanup_tasks = [
