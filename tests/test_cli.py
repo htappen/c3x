@@ -1,3 +1,4 @@
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -1970,12 +1971,17 @@ def test_recover_interrupted_worker_resumes_transient_session(monkeypatch, tmp_p
 
     cli._recover_interrupted_workers(tmp_path, beads)
 
-    saved = RunRecord.load(run_dir / "run.json")
+    retry_intent = json.loads((run_dir / "retry.json").read_text(encoding="utf-8"))
+    assert retry_intent["attempt"] == 2
+    assert retry_intent["mode"] == "session"
+    assert retry_intent["session_id"] == "019e61af-8603-7b53-8099-9284e6bc16bd"
+    assert (tmp_path / ".flow" / "runs" / "bd-1-attempt-2" / "run.json").exists()
+    assert ("bd-1", "open") in beads.statuses
+    assert ("bd-1", ["flow", "ready"]) in beads.added_labels
+
+    saved = cli._start_ready_worker(tmp_path, object(), beads, beads.items["bd-1"])
     assert saved.attempt == 2
     assert saved.pid == 67890
-    assert (tmp_path / ".flow" / "runs" / "bd-1-attempt-2" / "run.json").exists()
-    assert ("bd-1", "in_progress") in beads.statuses
-    assert ("bd-1", ["flow", "running", "attempt-2"]) in beads.added_labels
 
 
 def test_kill_workers_dry_run_lists_live_recorded_workers(monkeypatch, tmp_path: Path) -> None:
@@ -2049,7 +2055,7 @@ def test_kill_worker_process_tree_avoids_shared_process_group(monkeypatch) -> No
     assert killed_pids == [(12346, cli.signal.SIGKILL), (12345, cli.signal.SIGKILL)]
 
 
-def test_retry_fresh_archives_current_run_and_starts_new_worktree(monkeypatch, tmp_path: Path) -> None:
+def test_retry_fresh_archives_current_run_and_queues_new_worktree(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     beads = _RecordingBeads()
     beads.items["bd-1"] = BeadSummary(
@@ -2105,10 +2111,12 @@ def test_retry_fresh_archives_current_run_and_starts_new_worktree(monkeypatch, t
     archived_record = RunRecord.load(archived / "run.json")
     assert archived_record.prompt == str(archived / "prompt.md")
     assert archived_record.last_message == str(archived / "last-message.md")
-    assert RunRecord.load(run_dir / "run.json").attempt == 2
+    retry_intent = json.loads((run_dir / "retry.json").read_text(encoding="utf-8"))
+    assert retry_intent["attempt"] == 2
+    assert retry_intent["mode"] == "fresh"
     assert ("bd-1", "open") in beads.statuses
-    assert ("bd-1", "in_progress") in beads.statuses
-    assert ("bd-1", ["flow", "running", "attempt-2"]) in beads.added_labels
+    assert ("bd-1", "in_progress") not in beads.statuses
+    assert ("bd-1", ["flow", "ready"]) in beads.added_labels
     assert any("blocker-result-missing" in labels for item_id, labels in beads.removed_labels if item_id == "bd-1")
 
 
@@ -2161,8 +2169,9 @@ def test_retry_archive_dir_uses_new_attempt_number(monkeypatch, tmp_path: Path) 
     assert result.exit_code == 0
     assert (tmp_path / ".flow" / "runs" / "bd-1-attempt-6" / "run.json").exists()
     assert not (tmp_path / ".flow" / "runs" / "bd-1-attempt-3-2").exists()
-    assert RunRecord.load(run_dir / "run.json").attempt == 6
-    assert ("bd-1", ["flow", "running", "attempt-6"]) in beads.added_labels
+    retry_intent = json.loads((run_dir / "retry.json").read_text(encoding="utf-8"))
+    assert retry_intent["attempt"] == 6
+    assert ("bd-1", ["flow", "ready"]) in beads.added_labels
 
 
 def test_retry_defaults_to_resuming_previous_session(monkeypatch, tmp_path: Path) -> None:
@@ -2225,10 +2234,15 @@ def test_retry_defaults_to_resuming_previous_session(monkeypatch, tmp_path: Path
     result = runner.invoke(cli.app, ["retry", "bd-1"])
 
     assert result.exit_code == 0
-    assert "Resumed session" in result.stdout
+    assert "Queued session retry" in result.stdout
+    assert resumed == []
+    retry_intent = json.loads((run_dir / "retry.json").read_text(encoding="utf-8"))
+    assert retry_intent["mode"] == "session"
+    assert retry_intent["attempt"] == 2
+    assert retry_intent["session_id"] == "019e61af-8603-7b53-8099-9284e6bc16bd"
+    record = cli._start_ready_worker(tmp_path, object(), beads, beads.items["bd-1"])
     assert resumed == ["019e61af-8603-7b53-8099-9284e6bc16bd"]
-    assert RunRecord.load(run_dir / "run.json").attempt == 2
-    assert ("bd-1", ["flow", "running", "attempt-2"]) in beads.added_labels
+    assert record.attempt == 2
 
 
 def test_retry_clears_review_cleanup_blockers(monkeypatch, tmp_path: Path) -> None:
@@ -2444,10 +2458,13 @@ def test_retry_review_fix_fresh_uses_source_worktree(monkeypatch, tmp_path: Path
     result = runner.invoke(cli.app, ["retry", "bd-2", "--fresh"])
 
     assert result.exit_code == 0
-    assert "Continued worktree" in result.stdout
-    assert continued == [str(source_worktree)]
+    assert "Queued worktree retry" in result.stdout
+    assert continued == []
     assert started == []
-    saved = RunRecord.load(tmp_path / ".flow" / "runs" / "bd-2" / "run.json")
+    retry_intent = json.loads((tmp_path / ".flow" / "runs" / "bd-2" / "retry.json").read_text(encoding="utf-8"))
+    assert retry_intent["mode"] == "worktree"
+    saved = cli._start_ready_worker(tmp_path, object(), beads, beads.items["bd-2"])
+    assert continued == [str(source_worktree)]
     assert saved.branch == "c3x/bd-1-fix"
     assert saved.worktree == str(source_worktree)
 
@@ -2594,8 +2611,11 @@ def test_retry_nested_review_fix_fresh_uses_original_ancestor_worktree(monkeypat
     result = runner.invoke(cli.app, ["retry", "bd-3", "--fresh"])
 
     assert result.exit_code == 0
+    assert continued == []
+    retry_intent = json.loads((tmp_path / ".flow" / "runs" / "bd-3" / "retry.json").read_text(encoding="utf-8"))
+    assert retry_intent["mode"] == "worktree"
+    saved = cli._start_ready_worker(tmp_path, object(), beads, beads.items["bd-3"])
     assert continued == [str(original_worktree)]
-    saved = RunRecord.load(tmp_path / ".flow" / "runs" / "bd-3" / "run.json")
     assert saved.worktree == str(original_worktree)
 
 
@@ -2743,8 +2763,11 @@ def test_retry_can_continue_existing_worktree_with_fresh_context(monkeypatch, tm
     result = runner.invoke(cli.app, ["retry", "bd-1", "--continue-worktree"])
 
     assert result.exit_code == 0
-    assert "Continued worktree" in result.stdout
+    assert "Queued worktree retry" in result.stdout
+    assert continued == []
+    record = cli._start_ready_worker(tmp_path, object(), beads, beads.items["bd-1"])
     assert continued == [str(worktree)]
+    assert record.attempt == 2
 
 
 def test_retry_all_retries_blocked_flow_tasks(monkeypatch, tmp_path: Path) -> None:
@@ -2781,9 +2804,11 @@ def test_retry_all_retries_blocked_flow_tasks(monkeypatch, tmp_path: Path) -> No
     result = runner.invoke(cli.app, ["retry", "--all"])
 
     assert result.exit_code == 0
-    assert started == ["bd-1", "bd-2"]
-    assert ("bd-1", "in_progress") in beads.statuses
-    assert ("bd-2", "in_progress") in beads.statuses
+    assert started == []
+    assert (tmp_path / ".flow" / "runs" / "bd-1" / "retry.json").exists()
+    assert (tmp_path / ".flow" / "runs" / "bd-2" / "retry.json").exists()
+    assert ("bd-1", "open") in beads.statuses
+    assert ("bd-2", "open") in beads.statuses
 
 
 def test_squash_task_squashes_landed_tip_segment(monkeypatch, tmp_path: Path) -> None:
@@ -3697,10 +3722,12 @@ def test_unstick_fix_removes_stale_running_worker_state(monkeypatch, tmp_path: P
         labels=("flow", "running"),
     )
     run_dir = tmp_path / ".flow" / "runs" / "bd-1"
+    worktree = tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"
+    worktree.mkdir(parents=True)
     RunRecord(
         task_id="bd-1",
         branch="c3x/bd-1-fix",
-        worktree=str(tmp_path / ".flow" / "worktrees" / "c3x-bd-1-fix"),
+        worktree=str(worktree),
         prompt=str(run_dir / "prompt.md"),
         result=str(run_dir / "result.json"),
         last_message=str(run_dir / "last-message.md"),
@@ -3718,8 +3745,12 @@ def test_unstick_fix_removes_stale_running_worker_state(monkeypatch, tmp_path: P
     assert saved.status == "blocked"
     assert saved.outcome == "worker-not-live"
     assert saved.pid is None
-    assert ("bd-1", ["flow", "blocked", "blocker-worker-not-live"]) in beads.added_labels
-    assert ("bd-1", ["running", "reviewing"]) in beads.removed_labels
+    retry_intent = json.loads((run_dir / "retry.json").read_text(encoding="utf-8"))
+    assert retry_intent["mode"] == "worktree"
+    assert retry_intent["previous"]["task_id"] == "bd-1"
+    assert ("bd-1", "open") in beads.statuses
+    assert ("bd-1", ["flow", "ready"]) in beads.added_labels
+    assert any("running" in labels for item_id, labels in beads.removed_labels if item_id == "bd-1")
 
 
 def test_unstick_fix_blocks_stale_running_when_run_record_missing(monkeypatch, tmp_path: Path) -> None:
@@ -3738,8 +3769,11 @@ def test_unstick_fix_blocks_stale_running_when_run_record_missing(monkeypatch, t
 
     assert result.exit_code == 0
     assert "mark-blocked-missing-run-record" in result.stdout
-    assert ("bd-1", ["flow", "blocked", "blocker-run-record-missing"]) in beads.added_labels
-    assert ("bd-1", ["running", "reviewing"]) in beads.removed_labels
+    retry_intent = json.loads((tmp_path / ".flow" / "runs" / "bd-1" / "retry.json").read_text(encoding="utf-8"))
+    assert retry_intent["mode"] == "fresh"
+    assert ("bd-1", "open") in beads.statuses
+    assert ("bd-1", ["flow", "ready"]) in beads.added_labels
+    assert any("running" in labels for item_id, labels in beads.removed_labels if item_id == "bd-1")
 
 
 def test_unstick_does_not_close_contained_dirty_worktree(monkeypatch, tmp_path: Path) -> None:

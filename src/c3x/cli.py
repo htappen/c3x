@@ -72,6 +72,16 @@ RetryMode = Literal["session", "worktree", "fresh"]
 
 
 @dataclass(frozen=True)
+class RetryIntent:
+    task_id: str
+    mode: RetryMode
+    attempt: int
+    reason: str
+    previous: RunRecord | None = None
+    session_id: str | None = None
+
+
+@dataclass(frozen=True)
 class CleanupAction:
     task_id: str
     run_dir: Path
@@ -420,14 +430,13 @@ def retry(
         _import_finished_results(root, beads)
         task_ids = _retry_task_ids(beads, task_id=task_id, all_tasks=all_tasks)
         for item_id in task_ids:
-            record, mode_used = _retry_task(root, config, beads, item_id, retry_mode=retry_mode)
+            intent = _retry_task(root, config, beads, item_id, retry_mode=retry_mode)
             action = {
-                "session": "Resumed session",
-                "worktree": "Continued worktree",
-                "fresh": "Retried fresh",
-            }[mode_used]
-            console.print(f"[green]{action}[/green] {item_id} as attempt {record.attempt}")
-            console.print(f"Worktree: {record.worktree}")
+                "session": "Queued session retry",
+                "worktree": "Queued worktree retry",
+                "fresh": "Queued fresh retry",
+            }[intent.mode]
+            console.print(f"[green]{action}[/green] {item_id} as attempt {intent.attempt}")
     except (AgentError, BeadsError, GitError, ValueError) as exc:
         raise typer.Exit(_error(str(exc))) from exc
 
@@ -1483,9 +1492,9 @@ def _supervisor_tick(
                 break
             if "flow" in task.labels:
                 _write_activity(root, f"dispatching worker {task.id}")
-                _start_ready_worker(root, config, beads, task)
+                record = _start_ready_worker(root, config, beads, task)
                 beads.set_status(task.id, "in_progress")
-                beads.add_labels(task.id, ["flow", "running"])
+                beads.add_labels(task.id, ["flow", "running", f"attempt-{record.attempt}"])
                 beads.remove_labels(task.id, ["ready", "blocked", "reviewing"])
                 dispatched += 1
         if dispatched == 0:
@@ -1583,6 +1592,13 @@ def _plan_inbox(root: Path, beads: Beads) -> None:
 
 
 def _start_ready_worker(root: Path, config: object, beads: Beads, task: BeadSummary) -> RunRecord:
+    intent = _load_retry_intent(root, task.id)
+    if intent is not None:
+        try:
+            return _start_retry_intent(root, config, task, intent)
+        finally:
+            _retry_intent_path(root, task.id).unlink(missing_ok=True)
+
     source = _review_fix_source_record(root, beads, task)
     if source is None:
         return start_worker(root, config, task)
@@ -1593,6 +1609,24 @@ def _start_ready_worker(root: Path, config: object, beads: Beads, task: BeadSumm
         source,
         reason=f"repair review issue blocking {_review_fix_parent_id(beads, task) or 'the reviewed task'}",
     )
+
+
+def _start_retry_intent(root: Path, config: object, task: BeadSummary, intent: RetryIntent) -> RunRecord:
+    previous = intent.previous
+    worktree_exists = previous is not None and Path(previous.worktree).exists()
+    if intent.mode == "session" and worktree_exists and intent.session_id:
+        return resume_session_worker(
+            root,
+            config,
+            task,
+            previous,
+            session_id=intent.session_id,
+            reason=intent.reason,
+            attempt=intent.attempt,
+        )
+    if intent.mode in {"session", "worktree"} and previous is not None and worktree_exists:
+        return continue_worktree_worker(root, config, task, previous, reason=intent.reason, attempt=intent.attempt)
+    return start_worker(root, config, task, attempt=intent.attempt)
 
 
 def _validate_item_interactively(root: Path, beads: Beads, item_id: str) -> None:
@@ -1729,7 +1763,7 @@ def _retry_task(
     task_id: str,
     *,
     retry_mode: RetryMode = "session",
-) -> tuple[RunRecord, RetryMode]:
+) -> RetryIntent:
     task = beads.show(task_id)
     _ensure_retryable(root, task_id)
     _clear_review_cleanup_blockers(beads, task)
@@ -1743,34 +1777,66 @@ def _retry_task(
     worktree_exists = previous is not None and Path(previous.worktree).exists()
     reason = _retry_reason(task, previous) if previous is not None else "retry requested"
     if _is_review_fix(task) and worktree_exists:
-        record = continue_worktree_worker(root, config, task, previous, reason=reason, attempt=attempt)
         mode_used = "worktree"
-        note = f"c3x continued source review worktree as attempt {record.attempt} from {previous.task_id}"
+        note = f"c3x queued source review worktree retry as attempt {attempt} from {previous.task_id}"
     elif retry_mode == "session" and worktree_exists and session_id:
-        record = resume_session_worker(
-            root,
-            config,
-            task,
-            previous,
-            session_id=session_id,
-            reason=reason,
-            attempt=attempt,
-        )
-        mode_used: RetryMode = "session"
-        note = f"c3x resumed session {session_id} as attempt {record.attempt}"
+        mode_used = "session"
+        note = f"c3x queued session retry as attempt {attempt}"
     elif retry_mode in {"session", "worktree"} and worktree_exists:
-        record = continue_worktree_worker(root, config, task, previous, reason=reason, attempt=attempt)
         mode_used = "worktree"
-        note = f"c3x continued worktree as attempt {record.attempt} from attempt {previous.attempt}"
+        note = f"c3x queued worktree retry as attempt {attempt} from attempt {previous.attempt}"
     else:
-        record = start_worker(root, config, task, attempt=attempt)
         mode_used = "fresh"
-        note = f"c3x retry started attempt {record.attempt}"
-    beads.set_status(task_id, "in_progress")
-    beads.add_labels(task_id, ["flow", "running", f"attempt-{record.attempt}"])
-    beads.remove_labels(task_id, ["ready", "reviewing", "blocked"])
+        note = f"c3x queued fresh retry as attempt {attempt}"
+    intent = RetryIntent(
+        task_id=task_id,
+        mode=mode_used,
+        attempt=attempt,
+        reason=reason,
+        previous=previous,
+        session_id=session_id,
+    )
+    _save_retry_intent(root, intent)
     beads.add_note(task_id, note)
-    return record, mode_used
+    return intent
+
+
+def _retry_intent_path(root: Path, task_id: str) -> Path:
+    return run_record_path(root, task_id).parent / "retry.json"
+
+
+def _save_retry_intent(root: Path, intent: RetryIntent) -> None:
+    path = _retry_intent_path(root, intent.task_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "task_id": intent.task_id,
+        "mode": intent.mode,
+        "attempt": intent.attempt,
+        "reason": intent.reason,
+        "previous": intent.previous.model_dump(mode="json") if intent.previous is not None else None,
+        "session_id": intent.session_id,
+    }
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _load_retry_intent(root: Path, task_id: str) -> RetryIntent | None:
+    path = _retry_intent_path(root, task_id)
+    if not path.exists():
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    previous_payload = payload.get("previous")
+    previous = RunRecord.model_validate(previous_payload) if previous_payload is not None else None
+    mode = payload.get("mode")
+    if mode not in {"session", "worktree", "fresh"}:
+        raise ValueError(f"invalid retry mode in {path}: {mode!r}")
+    return RetryIntent(
+        task_id=str(payload["task_id"]),
+        mode=mode,
+        attempt=int(payload["attempt"]),
+        reason=str(payload.get("reason") or "retry requested"),
+        previous=previous,
+        session_id=payload.get("session_id"),
+    )
 
 
 def _clear_review_cleanup_blockers(beads: Beads, task: BeadSummary) -> None:
@@ -3081,10 +3147,22 @@ def _print_unstick_candidates(candidates: list[UnstickCandidate], *, fix: bool) 
 
 
 def _apply_unstick_candidate(root: Path, beads: Beads, candidate: UnstickCandidate) -> None:
+    item = beads.show(candidate.task_id)
     if candidate.action == "mark-blocked-missing-run-record":
         beads.add_note(candidate.task_id, "c3x unstick found stale running state with no canonical run.json")
-        beads.add_labels(candidate.task_id, ["flow", "blocked", "blocker-run-record-missing"])
-        beads.remove_labels(candidate.task_id, ["running", "reviewing"])
+        _save_retry_intent(
+            root,
+            RetryIntent(
+                task_id=candidate.task_id,
+                mode="fresh",
+                attempt=_next_attempt(root, candidate.task_id),
+                reason="stale running state with no canonical run record",
+                previous=None,
+            ),
+        )
+        beads.set_status(candidate.task_id, "open")
+        beads.add_labels(candidate.task_id, ["flow", "ready"])
+        beads.remove_labels(candidate.task_id, _retry_removed_labels(item))
         return
 
     if candidate.action in {"mark-completed-from-result", "mark-reviewed", "close-contained"}:
@@ -3093,15 +3171,24 @@ def _apply_unstick_candidate(root: Path, beads: Beads, candidate: UnstickCandida
             task_list = ", ".join(task.id for task in cleanup_tasks)
             raise ValueError(f"{candidate.task_id} still has review cleanup blockers: {task_list}")
 
-    item = beads.show(candidate.task_id)
     if candidate.action == "mark-blocked-stale-running":
         record = _optional_repaired_current_run_record(root, candidate.task_id)
         if record is not None:
             _commit_unstick_worktree_if_dirty(root, record)
         beads.add_note(candidate.task_id, "c3x unstick removed stale running worker state")
-        beads.add_labels(candidate.task_id, ["flow", "blocked", "blocker-worker-not-live"])
-        beads.remove_labels(candidate.task_id, ["running", "reviewing"])
+        beads.set_status(candidate.task_id, "open")
+        beads.add_labels(candidate.task_id, ["flow", "ready"])
+        beads.remove_labels(candidate.task_id, _retry_removed_labels(item))
         if record is not None:
+            intent = RetryIntent(
+                task_id=candidate.task_id,
+                mode=_supervisor_retry_mode(record),
+                attempt=_next_attempt(root, candidate.task_id),
+                reason=_retry_reason(item, record),
+                previous=record,
+                session_id=_session_id_for_run(record),
+            )
+            _save_retry_intent(root, intent)
             record.status = "blocked"
             record.outcome = record.outcome or "worker-not-live"
             record.pid = None
@@ -3588,14 +3675,14 @@ def _recover_interrupted_workers(root: Path, beads: Beads) -> None:
             continue
         try:
             if _is_transient_worker_failure(record):
-                _, mode_used = _retry_task(
+                intent = _retry_task(
                     root,
                     config,
                     beads,
                     record.task_id,
                     retry_mode=_supervisor_retry_mode(record),
                 )
-                action = "Resumed session" if mode_used == "session" else "Continued worktree"
+                action = "Queued session retry" if intent.mode == "session" else "Queued worktree retry"
                 console.print(f"[yellow]{action}[/yellow] {record.task_id}")
             else:
                 _block_missing_worker_result(root, beads, record)
