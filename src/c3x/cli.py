@@ -1081,14 +1081,17 @@ def _build_codex_status_table(snapshot: StatusSnapshot) -> Table:
     table = Table(title=f"{provider} /status")
     table.add_column("Task")
     table.add_column("Latest")
+    table.add_column("Last output")
+    table.add_column("Logs")
     rows = 0
     for record in _provider_status_records(snapshot, active_ids=active_ids):
         status = _codex_status_for_record(record) or _worker_status_fallback(record)
         if status:
-            table.add_row(record.task_id, status)
+            freshness = _worker_output_freshness(record)
+            table.add_row(record.task_id, status, freshness.last_output, freshness.total_size)
             rows += 1
     if rows == 0:
-        table.add_row("-", "no captured /status output")
+        table.add_row("-", "no captured /status output", "", "")
     return table
 
 
@@ -1133,9 +1136,13 @@ def _worker_status_fallback(record: RunRecord) -> str:
         ]
     )
     if _has_usage_limit_evidence(text):
-        return "no /status captured; Codex usage limit evidence in worker logs"
+        detail = _limit_evidence_detail(text)
+        suffix = f": {detail}" if detail else ""
+        return f"no /status captured; usage limit evidence in worker logs{suffix}"
     if "rate limit" in text.lower() or "429" in text:
-        return "no /status captured; Codex rate limit evidence in worker logs"
+        detail = _limit_evidence_detail(text)
+        suffix = f": {detail}" if detail else ""
+        return f"no /status captured; rate limit evidence in worker logs{suffix}"
     if text.strip():
         return "no /status captured; latest worker output exists"
     return ""
@@ -3893,7 +3900,61 @@ def _read_tail(path: Path, *, max_chars: int) -> str:
 
 
 def _has_usage_limit_evidence(text: str) -> bool:
-    return "usage limit" in text.lower()
+    lowered = text.lower()
+    return any(
+        pattern in lowered
+        for pattern in (
+            "usage limit",
+            "quota",
+            "available balance",
+            "weekly limit",
+            "monthly limit",
+        )
+    )
+
+
+def _limit_evidence_detail(text: str) -> str:
+    for line in reversed([line.strip() for line in text.splitlines() if line.strip()]):
+        lowered = line.lower()
+        if _has_usage_limit_evidence(line) or "rate limit" in lowered or "429" in line:
+            line = re.sub(r"https?://\S+", "[link]", line)
+            return _one_line(line)[:180]
+    return ""
+
+
+@dataclass(frozen=True)
+class WorkerOutputFreshness:
+    last_output: str
+    total_size: str
+
+
+def _worker_output_freshness(record: RunRecord) -> WorkerOutputFreshness:
+    run_dir = Path(record.prompt).parent
+    paths = [run_dir / "stdout.log", run_dir / "stderr.log"]
+    total_bytes = 0
+    newest: float | None = None
+    existing = False
+    for path in paths:
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            continue
+        existing = True
+        total_bytes += stat.st_size
+        newest = stat.st_mtime if newest is None else max(newest, stat.st_mtime)
+    if not existing:
+        return WorkerOutputFreshness("none", "0 KiB")
+    last_output = _age_label(datetime.fromtimestamp(newest, tz=timezone.utc).isoformat()) if newest else "none"
+    return WorkerOutputFreshness(last_output, _format_kib(total_bytes))
+
+
+def _format_kib(size_bytes: int) -> str:
+    if size_bytes == 0:
+        return "0 KiB"
+    kib = size_bytes / 1024
+    if kib < 10:
+        return f"{kib:.1f} KiB"
+    return f"{kib:.0f} KiB"
 
 
 def _process_is_running(pid: int) -> bool:

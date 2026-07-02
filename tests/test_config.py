@@ -31,7 +31,9 @@ def test_load_config_uses_defaults_when_missing(tmp_path: Path) -> None:
     assert "--conversation" in config.agents.antigravity_resume_args
     assert config.agents.opencode_command == "opencode"
     assert "run" in config.agents.opencode_args
+    assert "--print-logs" in config.agents.opencode_args
     assert "--session" in config.agents.opencode_resume_args
+    assert "--print-logs" in config.agents.opencode_resume_args
     assert config.limits.max_parallel_workers == 3
 
 

@@ -991,6 +991,8 @@ def test_status_renders_captured_opencode_status(monkeypatch, tmp_path: Path) ->
         "continuing task",
         encoding="utf-8",
     )
+    (run_dir / "stdout.log").write_text("", encoding="utf-8")
+    (run_dir / "stderr.log").write_text("worker booted\n", encoding="utf-8")
     RunRecord(
         task_id="bd-3",
         branch="c3x/bd-3-running",
@@ -1021,7 +1023,11 @@ def test_status_renders_captured_opencode_status(monkeypatch, tmp_path: Path) ->
 
     assert result.exit_code == 0
     assert "opencode /status" in result.stdout
-    assert "Model: opencode/gpt-5.1-codex Context: 8k / 200k" in result.stdout
+    assert "Model: opencode/gpt-5.1-codex" in result.stdout
+    assert "Context: 8k / 200k" in result.stdout
+    assert "Last output" in result.stdout
+    assert "Logs" in result.stdout
+    assert "KiB" in result.stdout
 
 
 def test_status_renders_usage_limit_fallback_for_blocked_worker(monkeypatch, tmp_path: Path) -> None:
@@ -1054,7 +1060,53 @@ def test_status_renders_usage_limit_fallback_for_blocked_worker(monkeypatch, tmp
 
     assert result.exit_code == 0
     assert "bd-usage" in result.stdout
-    assert "Codex usage limit evidence" in result.stdout
+    assert "usage limit evidence" in result.stdout
+    assert "Logs" in result.stdout
+
+
+def test_status_renders_opencode_weekly_usage_limit(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    beads = _RecordingBeads()
+    beads.items["bd-opencode"] = BeadSummary(id="bd-opencode", title="blocked", labels=("flow", "blocked"))
+    run_dir = tmp_path / ".flow" / "runs" / "bd-opencode"
+    stderr = run_dir / "stderr.log"
+    stderr.parent.mkdir(parents=True)
+    stderr.write_text(
+        'timestamp=2026-07-02T00:19:10.645Z level=ERROR message="stream error" '
+        'error.error="AI_APICallError: Weekly usage limit reached. Resets in 3 days. '
+        'To continue using this model now, enable usage from your available balance: '
+        'https://opencode.ai/workspace/example/go"\n',
+        encoding="utf-8",
+    )
+    (run_dir / "stdout.log").write_text("", encoding="utf-8")
+    RunRecord(
+        task_id="bd-opencode",
+        branch="c3x/bd-opencode",
+        worktree=str(tmp_path / ".flow" / "worktrees" / "bd-opencode"),
+        prompt=str(run_dir / "prompt.md"),
+        result=str(run_dir / "result.json"),
+        last_message=str(run_dir / "last-message.md"),
+        status="blocked",
+        provider="opencode",
+        pid=1234,
+    ).save(run_dir / "run.json")
+    monkeypatch.setattr(cli, "_root", lambda: tmp_path)
+    monkeypatch.setattr(cli, "_beads", lambda root: beads)
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda root: type("Config", (), {"limits": type("Limits", (), {"max_parallel_workers": 3})()})(),
+    )
+
+    result = runner.invoke(cli.app, ["status"])
+
+    assert result.exit_code == 0
+    assert "bd-opencode" in result.stdout
+    assert "Logs" in result.stdout
+
+    fallback = cli._worker_status_fallback(RunRecord.load(run_dir / "run.json"))
+    assert "usage limit evidence" in fallback
+    assert "Weekly usage limit reached" in fallback
 
 
 def test_status_hides_provider_logs_for_closed_records(monkeypatch, tmp_path: Path) -> None:

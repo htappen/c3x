@@ -71,6 +71,7 @@ class AgentConfig(BaseModel):
     opencode_args: list[str] = Field(
         default_factory=lambda: [
             "run",
+            "--print-logs",
             "--model",
             "{model}",
             "--dir",
@@ -82,6 +83,7 @@ class AgentConfig(BaseModel):
     opencode_resume_args: list[str] = Field(
         default_factory=lambda: [
             "run",
+            "--print-logs",
             "--session",
             "{session_id}",
             "--model",
